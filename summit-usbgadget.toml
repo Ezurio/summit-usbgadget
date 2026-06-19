@@ -1,0 +1,82 @@
+# Example configuration for summit-usbgadget.
+#
+# This uses the same TOML schema as the `usb-gadget` CLI tool, with additional
+# `dfu` and `fbk` function types serviced by this daemon. Run with:
+#
+#   sudo summit-usbgadget /etc/summit-usbgadget.toml
+#
+# Numbers accept decimal or 0x-prefixed hex.
+
+name = "composite"
+# udc selects which USB device controllers to bind. It may be:
+#   omitted          -> bind the first controller that appears
+#   "11401000.usb"   -> bind that specific controller
+#   ["a.usb","b.usb"] -> bind each listed controller
+#   "all"            -> bind every controller, including hotplugged ones
+# Controllers are discovered via udev events, so the UDC driver may load later.
+# udc = "11401000.usb"
+
+[device]
+vendor = 0x1d50
+product = 0x6089
+manufacturer = "Ezurio"
+product_name = "Composite DFU gadget"
+# product_name_source = "custom"  # custom (use product_name) | model (device-tree model)
+serial = "0001"
+# serial_source = "auto"      # auto | custom | uboot_ethaddr | uboot_eth1addr
+#   auto  : /etc/wifi_mac -> soc_uid -> eth1 -> eth0 -> deadbeefdeadbeef
+#   custom: use the `serial` value above verbatim (default when `serial` is set)
+class = 0xef                  # miscellaneous device (uses IADs)
+sub_class = 2
+protocol = 1
+
+[[config]]
+description = "composite"
+
+# A standard CDC ACM serial port.
+[[config.function]]
+type = "serial"
+class = "acm"                 # "acm" or "generic"
+
+# A CDC NCM network interface.
+[[config.function]]
+type = "net"
+class = "ncm"                 # ecm | ecm_subset | eem | ncm | rndis
+
+# A USB DFU interface that streams received firmware directly into SWUpdate.
+# Nothing is written to a local or temporary file: each DFU block is forwarded
+# straight to the SWUpdate IPC socket, and `disable_store_swu` keeps SWUpdate
+# from persisting a copy of the SWU.
+[[config.function]]
+type = "dfu"
+download = "swupdate"         # "swupdate" or "file:/path/to/output"
+transfer_size = 4096
+poll_timeout_ms = 10
+# SWUpdate target slot is a pure runtime decision (no user choice), via
+# boot-rootfs.sh: an SD-card boot is a full-disk "complete" update; any other
+# device targets the inactive A/B slot ("<image_mode>-<inactive_side>").
+# software_set = "stable"     # default
+# image_mode = "full"         # default label for the A/B case; replaceable
+# dry_run = false
+# disable_store_swu = true    # default; set false to let SWUpdate store the SWU
+# timeout_secs = 120
+# upload serves DFU_UPLOAD. Use a file path to read firmware back, or "sysinfo"
+# to report device system information (model, serial, SoC, memory, HW part no.):
+# upload = "sysinfo"
+# upload = "/var/tmp/readback.bin"
+
+# An FBK-style streamed upload/download interface implemented by this service.
+# It accepts the same options as the `dfu` function above.
+# [[config.function]]
+# type = "fbk"
+# download = "swupdate"         # "swupdate" or "file:/path/to/output"
+# upload = "sysinfo"            # file path, or "sysinfo" for device info
+# transfer_size = 4096
+# poll_timeout_ms = 10
+
+# A mass-storage device example (optional):
+# [[config.function]]
+# type = "msd"
+# [[config.function.lun]]
+# file = "/var/lib/usbdisk.img"
+# removable = true

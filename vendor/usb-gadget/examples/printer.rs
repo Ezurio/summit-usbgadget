@@ -1,0 +1,168 @@
+//! Printer example userspace application based on [prn_example](https://docs.kernel.org/6.6/usb/gadget_printer.html#example-code)
+//!
+//! Creates and binds a printer gadget function, then reads data from the device file created by the
+//! gadget to stdout. Will exit after printing a set number of pages.
+
+use rustix::ioctl::{self, opcode};
+use std::{
+    fs::{File, OpenOptions},
+    io::{self, Read, Result, Write},
+    thread,
+    time::Duration,
+};
+
+use usb_gadget::{
+    default_udc,
+    function::printer::{Printer, StatusFlags, GADGET_GET_PRINTER_STATUS, GADGET_SET_PRINTER_STATUS},
+    Class, Config, Gadget, Id, RegGadget, Strings, GADGET_IOC_MAGIC,
+};
+
+// Printer read buffer size, best equal to EP wMaxPacketSize
+const BUF_SIZE: usize = 512;
+// Printer device path - 0 assumes we are the only printer gadget!
+const DEV_PATH: &str = "/dev/g_printer0";
+// Pages to 'print' before exiting
+const PRINT_EXIT_COUNT: u8 = 1;
+// Default printer status
+const DEFAULT_STATUS: StatusFlags =
+    StatusFlags::from_bits_truncate(StatusFlags::NOT_ERROR.bits() | StatusFlags::SELECTED.bits());
+
+fn ioctl_read_printer_status(file: &File) -> Result<u8> {
+    let getter = unsafe {
+        ioctl::Getter::<{ opcode::read::<u8>(GADGET_IOC_MAGIC, GADGET_GET_PRINTER_STATUS) }, u8>::new()
+    };
+    Ok(unsafe { ioctl::ioctl(file, getter) }?)
+}
+
+fn ioctl_write_printer_status(file: &File, status: u8) -> Result<()> {
+    let mut value = status;
+    unsafe {
+        ioctl::ioctl(
+            file,
+            ioctl::Updater::<{ opcode::read_write::<u8>(GADGET_IOC_MAGIC, GADGET_SET_PRINTER_STATUS) }, _>::new(
+                &mut value,
+            ),
+        )
+    }?;
+    Ok(())
+}
+
+fn create_printer_gadget() -> Result<RegGadget> {
+    usb_gadget::remove_all().expect("cannot remove all gadgets");
+
+    let udc = default_udc().expect("cannot get UDC");
+    let mut builder = Printer::builder();
+    builder.pnp_string = Some("Rust PNP".to_string());
+
+    let (_, func) = builder.build();
+    let reg = Gadget::new(
+        Class::INTERFACE_SPECIFIC,
+        Id::LINUX_FOUNDATION_COMPOSITE,
+        Strings::new("Clippy Manufacturer", "Rusty Printer", "RUST0123456"),
+    )
+    .with_config(Config::new("Config 1").with_function(func))
+    .bind(&udc)?;
+
+    Ok(reg)
+}
+
+fn read_printer_data(file: &mut File) -> Result<()> {
+    let mut buf = [0u8; BUF_SIZE];
+    let mut printed = 0;
+    println!("Will exit after printing {} pages...", PRINT_EXIT_COUNT);
+
+    loop {
+        let bytes_read = match file.read(&mut buf) {
+            Ok(bytes_read) if bytes_read > 0 => bytes_read,
+            _ => break,
+        };
+        io::stdout().write_all(&buf[..bytes_read])?;
+        io::stdout().flush()?;
+
+        // check if %%EOF is in the buffer
+        if buf.windows(5).any(|w| w == b"%%EOF") {
+            printed += 1;
+            if printed == PRINT_EXIT_COUNT {
+                println!("Printed {} pages, exiting.", PRINT_EXIT_COUNT);
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn set_printer_status(file: &File, flags: StatusFlags, clear: bool) -> Result<StatusFlags> {
+    let mut status = get_printer_status(file)?;
+    if clear {
+        status.remove(flags);
+    } else {
+        status.insert(flags);
+    }
+    let bits = status.bits();
+    log::debug!("Setting printer status: {:08b}", bits);
+    ioctl_write_printer_status(file, bits)?;
+    Ok(StatusFlags::from_bits_truncate(bits))
+}
+
+fn get_printer_status(file: &File) -> Result<StatusFlags> {
+    let status = ioctl_read_printer_status(file)?;
+    log::debug!("Got printer status: {:08b}", status);
+    let status = StatusFlags::from_bits_truncate(status);
+    Ok(status)
+}
+
+fn print_status(status: StatusFlags) {
+    println!("Printer status is:");
+    if status.contains(StatusFlags::SELECTED) {
+        println!("     Printer is Selected");
+    } else {
+        println!("     Printer is NOT Selected");
+    }
+    if status.contains(StatusFlags::PAPER_EMPTY) {
+        println!("     Paper is Out");
+    } else {
+        println!("     Paper is Loaded");
+    }
+    if status.contains(StatusFlags::NOT_ERROR) {
+        println!("     Printer OK");
+    } else {
+        println!("     Printer ERROR");
+    }
+}
+
+fn main() -> Result<()> {
+    env_logger::init();
+
+    // create printer gadget, will unbind on drop
+    let g_printer = create_printer_gadget().map_err(|e| {
+        eprintln!("Failed to create printer gadget: {e}");
+        e
+    })?;
+    println!("Printer gadget created: {}", g_printer.path().display());
+
+    // wait for device file creation
+    println!("Attempt open device path: {DEV_PATH}");
+    let mut count = 0;
+    let mut file = loop {
+        thread::sleep(Duration::from_secs(1));
+
+        match OpenOptions::new().read(true).write(true).open(DEV_PATH) {
+            Ok(file) => break file,
+            Err(_) if count < 5 => count += 1,
+            Err(err) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Printer {DEV_PATH} not found or cannot open: {err}"),
+                ))
+            }
+        }
+    };
+
+    print_status(set_printer_status(&file, DEFAULT_STATUS, false)?);
+    if let Err(e) = read_printer_data(&mut file) {
+        return Err(io::Error::other(format!("Failed to read data from {DEV_PATH}: {e}")));
+    }
+
+    Ok(())
+}

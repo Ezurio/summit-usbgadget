@@ -1,0 +1,13 @@
+[package]
+name = "partition-identity"
+version = "0.3.1"
+edition = "2021"
+repository = "https://github.com/pop-os/partition-identity"
+description = "Find the ID of a device by its path, or find a device path by its ID."
+license = "MIT"
+keywords = ["linux", "partition"]
+categories = ["os", "os::unix-apis"]
+readme = "README.md"
+
+[dependencies]
+thiserror = "2"

@@ -1,0 +1,29 @@
+# USB mass storage gadget.
+#
+# Usage:
+#   usb-gadget up mass-storage.toml
+
+name = "mass-storage"
+# udc = "dummy_udc.0"
+
+[device]
+vendor = 0x1209
+product = 0x0004
+manufacturer = "Example Inc."
+product_name = "USB Storage"
+serial = "0001"
+
+[[config]]
+description = "Mass Storage"
+
+[[config.function]]
+type = "msd"
+stall = true
+
+[[config.function.lun]]
+file = "/tmp/disk.img"
+removable = true
+# read_only = false
+# cdrom = false
+# no_fua = false
+# inquiry_string = "Example"

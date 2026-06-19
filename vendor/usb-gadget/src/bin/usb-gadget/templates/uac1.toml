@@ -1,0 +1,34 @@
+# USB Audio Class 1 (UAC1) gadget.
+#
+# Usage:
+#   usb-gadget up uac1.toml
+
+name = "uac1"
+# udc = "dummy_udc.0"
+
+[device]
+vendor = 0x1209
+product = 0x0009
+manufacturer = "Example Inc."
+product_name = "USB Audio (UAC1)"
+serial = "0001"
+
+[[config]]
+description = "UAC1 Audio"
+
+[[config.function]]
+type = "uac1"
+function_name = "USB Audio"
+# request_number = 2
+
+[config.function.capture]
+[config.function.capture.channel]
+channel_mask = 3
+sample_rate = 48000
+sample_size = 2
+
+[config.function.playback]
+[config.function.playback.channel]
+channel_mask = 3
+sample_rate = 48000
+sample_size = 2

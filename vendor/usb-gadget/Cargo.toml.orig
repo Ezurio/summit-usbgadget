@@ -1,0 +1,57 @@
+[package]
+name = "usb-gadget"
+description = "Expose standard or fully custom USB peripherals (gadgets) through a USB device controller (UDC) on Linux."
+categories = ["hardware-support", "os::linux-apis"]
+keywords = ["usb", "gadget", "peripheral", "configfs", "functionfs"]
+license = "Apache-2.0"
+repository = "https://github.com/surban/usb-gadget"
+authors = ["Sebastian Urban <surban@surban.net>", "usb-gadget authors"]
+rust-version = "1.77"
+version = "1.2.0"
+edition = "2021"
+
+[features]
+default = []
+cli = ["dep:clap", "dep:clap_complete", "dep:serde", "dep:toml", "dep:env_logger"]
+
+[dependencies]
+bitflags = "2.4"
+byteorder = "1"
+bytes = "1.4"
+clap = { version = "4", features = ["derive"], optional = true }
+clap_complete = { version = "4", optional = true }
+env_logger = { version = "0.11", optional = true }
+libc = "0.2"
+log = "0.4"
+macaddr = "1.0"
+rustix = { version = "1", features = ["fs", "mount", "event", "system", "time"] }
+proc-mounts = "0.3"
+serde = { version = "1", features = ["derive"], optional = true }
+strum = { version = "0.28", features = ["derive"] }
+tokio = { version = "1.32", features = ["net", "rt", "sync"], optional = true }
+toml = { version = "1", optional = true }
+uuid = "1"
+
+[dev-dependencies]
+dma-buf = "0.5"
+dma-heap = "0.4"
+env_logger = "0.11"
+nusb = "0.2"
+serial_test = "3"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "time"] }
+
+[[example]]
+name = "custom_interface_device_async"
+required-features = ["tokio"]
+doc-scrape-examples = true
+
+[[bin]]
+name = "usb-gadget"
+path = "src/bin/usb-gadget/main.rs"
+required-features = ["cli"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]

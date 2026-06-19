@@ -1,0 +1,63 @@
+[package]
+name = "summit-usbgadget"
+version = "0.1.0"
+description = "Runtime-configurable composite USB gadget with a DFU function that streams firmware into SWUpdate."
+license = "Ezurio"
+authors = ["Ezurio LLC"]
+edition = "2021"
+rust-version = "1.84"
+resolver = "2"
+
+[lib]
+name = "summit_usbgadget"
+path = "src/lib.rs"
+
+[[bin]]
+name = "summit-usbgadget"
+path = "src/main.rs"
+
+[features]
+default = ["dfu", "fbk"]
+dfu = [
+	"dep:swupdate-ipc",
+	"tokio/fs",
+	"tokio/io-util",
+	"tokio/process",
+	"tokio/time",
+]
+fbk = [
+	"dep:swupdate-ipc",
+	"tokio/io-util",
+	"tokio/process",
+	"tokio/time",
+]
+
+[dependencies]
+usb-gadget = { version = "1.2", features = ["tokio"] }
+log = "0.4"
+simple_logger = { version = "5", default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
+swupdate-ipc = { path = "crates/swupdate-ipc", features = ["async"], optional = true }
+tokio = { version = "1", features = ["rt", "macros"] }
+tokio-udev = "0.10"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bytes = "1"
+crc32fast = "1.5"
+rustix = { version = "1.1.4", features = ["fs", "system"] }
+
+[lints.rust]
+warnings = "deny"
+
+[profile.dev]
+incremental = true
+
+[profile.test]
+incremental = true
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

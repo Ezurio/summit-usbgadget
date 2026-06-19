@@ -1,0 +1,571 @@
+//! USB Video Class (UVC) function.
+//!
+//! The Linux kernel configuration option `CONFIG_USB_CONFIGFS_F_UVC` must be enabled.
+//! It must be paired with a userspace program that responds to UVC control requests
+//! and fills buffers to be queued to the V4L2 device that the driver creates.
+//! See [example](https://gitlab.freedesktop.org/camera/uvc-gadget).
+//!
+//! # Example
+//!
+//! ```no_run
+//! use usb_gadget::{
+//!     default_udc,
+//!     function::video::{Format, Frame, Uvc},
+//!     Class, Config, Gadget, Id, Strings,
+//! };
+//!
+//! // Create a new UVC function with the specified frames:
+//! // - 640x360 YUYV format at 15, 30, 60, 120 fps
+//! // - 640x360 MJPEG format at 15, 30, 60, 120 fps
+//! // - 1280x720 MJPEG format at 30, 60 fps
+//! // - 1920x1080 MJPEG format at 30 fps
+//! let (video, func) = Uvc::new(vec![
+//!     Frame::new(640, 360, vec![15, 30, 60, 120], Format::Yuyv),
+//!     Frame::new(640, 360, vec![15, 30, 60, 120], Format::Mjpeg),
+//!     Frame::new(1280, 720, vec![30, 60], Format::Mjpeg),
+//!     Frame::new(1920, 1080, vec![30], Format::Mjpeg),
+//! ]);
+//!
+//! let udc = default_udc().expect("cannot get UDC");
+//! let reg = Gadget::new(
+//!     Class::MISCELLANEOUS_IAD,
+//!     Id::LINUX_FOUNDATION_COMPOSITE,
+//!     Strings::new("Clippy Manufacturer", "Rust Video Device", "RUST0123456"),
+//! )
+//! .with_config(Config::new("UVC Config 1").with_function(func))
+//! .bind(&udc)
+//! .expect("cannot bind to UDC");
+//!
+//! println!(
+//!     "UAC2 video {} at {} to {} status {:?}",
+//!     reg.name().to_string_lossy(),
+//!     reg.path().display(),
+//!     udc.name().to_string_lossy(),
+//!     video.status()
+//! );
+//! ```
+//! The gadget will bind won't enumaterate with host unless a userspace program (such as uvc-gadget)
+//! is running and responding to UVC control requests.
+
+use std::{
+    collections::HashSet,
+    ffi::{OsStr, OsString},
+    fs,
+    io::{Error, ErrorKind, Result},
+    path::{Path, PathBuf},
+};
+
+use super::{
+    util::{FunctionDir, Status},
+    Function, Handle,
+};
+
+pub(crate) fn driver() -> &'static OsStr {
+    OsStr::new("uvc")
+}
+
+/// USB Video Class (UVC) frame format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Format {
+    /// YUYV format [Packed YUV formats](https://docs.kernel.org/6.12/userspace-api/media/v4l/pixfmt-packed-yuv.html).
+    /// Currently only uncompressed format supported.
+    Yuyv,
+    /// MJPEG compressed format.
+    Mjpeg,
+    /// Framebased format with a custom GUID.
+    ///
+    /// The GUID identifies the pixel format. Use [`Format::nv12`] or [`Format::h264`] for
+    /// common formats, or provide a custom 16-byte GUID.
+    Framebased {
+        /// 16-byte GUID identifying the pixel format.
+        guid: [u8; 16],
+        /// Short name used for the configfs directory (e.g. `"nv12"`).
+        name: &'static str,
+        /// Bits per pixel, used to compute `dwBytesPerLine` as `width * bpp / 8`.
+        ///
+        /// Set to `0` for compressed formats (e.g. H.264) where bytes-per-line
+        /// is not meaningful.
+        bpp: u8,
+    },
+}
+
+impl Format {
+    /// NV12 framebased format.
+    ///
+    /// NV12 is a common semi-planar YUV 4:2:0 format used by many camera ISPs
+    /// and hardware video encoders/decoders.
+    pub fn nv12() -> Self {
+        Format::Framebased {
+            guid: [
+                b'N', b'V', b'1', b'2', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+            ],
+            name: "nv12",
+            bpp: 12,
+        }
+    }
+
+    /// H.264 framebased format.
+    pub fn h264() -> Self {
+        Format::Framebased {
+            guid: [
+                b'H', b'2', b'6', b'4', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+            ],
+            name: "h264",
+            bpp: 0,
+        }
+    }
+
+    fn all() -> &'static [Format] {
+        &[Format::Yuyv, Format::Mjpeg]
+    }
+
+    fn dir_name(&self) -> OsString {
+        match self {
+            Format::Yuyv => OsString::from("yuyv"),
+            Format::Mjpeg => OsString::from("mjpeg"),
+            Format::Framebased { name, .. } => OsString::from(name),
+        }
+    }
+
+    fn group_dir_name(&self) -> OsString {
+        match self {
+            Format::Yuyv => OsString::from("uncompressed"),
+            Format::Mjpeg => OsString::from("mjpeg"),
+            Format::Framebased { .. } => OsString::from("framebased"),
+        }
+    }
+
+    fn bytes_per_line(&self, width: u32) -> Option<u32> {
+        match self {
+            Format::Framebased { bpp, .. } => Some(width * (*bpp as u32) / 8),
+            _ => None,
+        }
+    }
+
+    fn group_path(&self) -> PathBuf {
+        format!("streaming/{}/{}", self.group_dir_name().to_string_lossy(), self.dir_name().to_string_lossy())
+            .into()
+    }
+
+    fn header_link_path(&self) -> PathBuf {
+        format!("streaming/header/h/{}", self.dir_name().to_string_lossy()).into()
+    }
+
+    fn color_matching_path(&self) -> PathBuf {
+        format!("streaming/color_matching/{}", self.dir_name().to_string_lossy()).into()
+    }
+
+    fn color_matching_link_path(&self) -> PathBuf {
+        self.group_path().join("color_matching")
+    }
+}
+
+/// Frame color matching information properties.
+///
+/// It’s possible to specify some colometry information for each format you
+/// create. This step is optional, and default information will be included if
+/// this step is skipped; those default values follow those defined in the
+/// Color Matching Descriptor section of the UVC specification.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ColorMatching {
+    /// Color primaries
+    pub color_primaries: u8,
+    /// Transfer characteristics
+    pub transfer_characteristics: u8,
+    /// Matrix coefficients
+    pub matrix_coefficients: u8,
+}
+
+impl ColorMatching {
+    /// Create a new color matching information with the specified properties.
+    pub fn new(color_primaries: u8, transfer_characteristics: u8, matrix_coefficients: u8) -> Self {
+        Self { color_primaries, transfer_characteristics, matrix_coefficients }
+    }
+}
+
+/// Helper to create a new [`UvcFrame`].
+#[derive(Debug, Clone)]
+pub struct Frame {
+    /// Frame width in pixels
+    pub width: u32,
+    /// Frame height in pixels
+    pub height: u32,
+    /// Frame [`Format`]
+    pub format: Format,
+    /// Frames per second available
+    pub fps: Vec<u16>,
+}
+
+impl Frame {
+    /// Create a new [`UvcFrame`] with the specified properties.
+    pub fn new(width: u32, height: u32, fps: Vec<u16>, format: Format) -> Self {
+        Self { width, height, format, fps }
+    }
+}
+
+impl From<Frame> for UvcFrame {
+    fn from(frame: Frame) -> Self {
+        UvcFrame {
+            width: frame.width,
+            height: frame.height,
+            intervals: frame.fps.iter().filter(|i| **i != 0).map(|i| 1_000_000_000 / *i as u32).collect(),
+            color_matching: None,
+            format: frame.format,
+        }
+    }
+}
+
+/// USB Video Class (UVC) frame configuration.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct UvcFrame {
+    /// Frame width in pixels
+    pub width: u32,
+    /// Frame height in pixels
+    pub height: u32,
+    /// Frame intervals available each in 100 ns units
+    pub intervals: Vec<u32>,
+    /// Color matching information. If not provided, the default values are used.
+    pub color_matching: Option<ColorMatching>,
+    /// Frame format
+    pub format: Format,
+}
+
+impl UvcFrame {
+    fn dir_name(&self) -> String {
+        format!("{}p", self.height)
+    }
+
+    fn path(&self) -> PathBuf {
+        self.format.group_path().join(self.dir_name())
+    }
+
+    /// Create a new UVC frame with the specified properties.
+    pub fn new(width: u32, height: u32, format: Format, intervals: impl IntoIterator<Item = u32>) -> Self {
+        Self { width, height, intervals: intervals.into_iter().collect(), color_matching: None, format }
+    }
+}
+
+/// Builder for USB Video Class (UVC) function. None value uses the f_uvc default/generated value.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct UvcBuilder {
+    /// Interval for polling endpoint for data transfers
+    pub streaming_interval: Option<u8>,
+    /// bMaxBurst for super speed companion descriptor. Valid values are 1-15.
+    pub streaming_max_burst: Option<u8>,
+    /// Maximum packet size this endpoint is capable of sending or receiving when this configuration
+    /// is selected. Valid values are 1024/2048/3072.
+    pub streaming_max_packet: Option<u32>,
+    /// Video device interface name
+    pub function_name: Option<String>,
+    /// Video frames available
+    pub frames: Vec<UvcFrame>,
+    /// Processing Unit's bmControls field
+    pub processing_controls: Option<u8>,
+    /// Camera Terminal's bmControls field
+    pub camera_controls: Option<u8>,
+}
+
+impl UvcBuilder {
+    /// Build the USB function.
+    ///
+    /// The returned handle must be added to a USB gadget configuration.
+    #[must_use]
+    pub fn build(self) -> (Uvc, Handle) {
+        let dir = FunctionDir::new();
+        (Uvc { dir: dir.clone() }, Handle::new(UvcFunction { builder: self, dir }))
+    }
+
+    /// Add a frame to builder
+    pub fn add_frame<F>(&mut self, frame: F)
+    where
+        UvcFrame: From<F>,
+    {
+        self.frames.push(frame.into());
+    }
+
+    /// UVC builder with frames
+    #[must_use]
+    pub fn with_frames<F>(mut self, frames: impl IntoIterator<Item = F>) -> Self
+    where
+        UvcFrame: From<F>,
+    {
+        self.frames = frames.into_iter().map(UvcFrame::from).collect();
+        self
+    }
+}
+
+#[derive(Debug)]
+struct UvcFunction {
+    builder: UvcBuilder,
+    dir: FunctionDir,
+}
+
+impl Function for UvcFunction {
+    fn driver(&self) -> OsString {
+        driver().into()
+    }
+
+    fn dir(&self) -> FunctionDir {
+        self.dir.clone()
+    }
+
+    fn register(&self) -> Result<()> {
+        if self.builder.frames.is_empty() {
+            return Err(Error::new(ErrorKind::InvalidInput, "at least one frame must exist"));
+        }
+
+        if self.builder.frames.iter().any(|f| f.intervals.is_empty()) {
+            return Err(Error::new(ErrorKind::InvalidInput, "at least one interval must exist for every frame"));
+        }
+
+        // format groups to link to header
+        let mut formats_to_link: HashSet<Format> = HashSet::new();
+
+        // create frame descriptors
+        for frame in &self.builder.frames {
+            self.dir.create_dir_all(frame.path())?;
+
+            // For framebased formats, write the GUID identifying the pixel format.
+            if let Format::Framebased { guid, .. } = &frame.format {
+                self.dir.write(frame.format.group_path().join("guidFormat"), guid)?;
+            }
+
+            self.dir.write(frame.path().join("wWidth"), frame.width.to_string())?;
+            self.dir.write(frame.path().join("wHeight"), frame.height.to_string())?;
+
+            // Framebased formats use dwBytesPerLine; others use dwMaxVideoFrameBufferSize.
+            if let Some(bpl) = frame.format.bytes_per_line(frame.width) {
+                self.dir.write(frame.path().join("dwBytesPerLine"), bpl.to_string())?;
+            } else {
+                self.dir.write(
+                    frame.path().join("dwMaxVideoFrameBufferSize"),
+                    (frame.width * frame.height * 2).to_string(),
+                )?;
+            }
+
+            self.dir.write(
+                frame.path().join("dwFrameInterval"),
+                frame.intervals.iter().map(|i| i.to_string()).collect::<Vec<String>>().join("\n"),
+            )?;
+            formats_to_link.insert(frame.format);
+
+            if let Some(color_matching) = frame.color_matching.as_ref() {
+                let color_matching_path = frame.format.color_matching_path();
+                // can only have one color matching information per format
+                if !color_matching_path.is_dir() {
+                    self.dir.create_dir_all(&color_matching_path)?;
+                    self.dir.write(
+                        frame.format.color_matching_path().join("bColorPrimaries"),
+                        color_matching.color_primaries.to_string(),
+                    )?;
+                    self.dir.write(
+                        frame.format.color_matching_path().join("bTransferCharacteristics"),
+                        color_matching.transfer_characteristics.to_string(),
+                    )?;
+                    self.dir.write(
+                        frame.format.color_matching_path().join("bMatrixCoefficients"),
+                        color_matching.matrix_coefficients.to_string(),
+                    )?;
+                    self.dir.symlink(&color_matching_path, frame.format.color_matching_link_path())?;
+                } else {
+                    log::warn!("Color matching information already exists for format {:?}", frame.format);
+                }
+            }
+        }
+
+        // header linking format descriptors and associated frames to header after creating
+        // otherwise cannot add new frames
+        self.dir.create_dir_all("streaming/header/h")?;
+        self.dir.create_dir_all("control/header/h")?;
+
+        for format in formats_to_link {
+            self.dir.symlink(format.group_path(), format.header_link_path())?;
+        }
+
+        // supported speeds: all linked but selected based on gadget speed: https://github.com/torvalds/linux/blob/master/drivers/usb/gadget/function/f_uvc.c#L732
+        self.dir.symlink("streaming/header/h", "streaming/class/fs/h")?;
+        self.dir.symlink("streaming/header/h", "streaming/class/hs/h")?;
+        self.dir.symlink("streaming/header/h", "streaming/class/ss/h")?;
+        self.dir.symlink("control/header/h", "control/class/fs/h")?;
+        self.dir.symlink("control/header/h", "control/class/ss/h")?;
+
+        // controls
+        if let Some(processing_controls) = self.builder.processing_controls {
+            self.dir.write("control/processing/default/bmControls", processing_controls.to_string())?;
+        }
+
+        // terminal
+        if let Some(camera_controls) = self.builder.camera_controls {
+            self.dir.write("control/terminal/camera/default/bmControls", camera_controls.to_string())?;
+        }
+
+        // bandwidth configuration
+        if let Some(interval) = self.builder.streaming_interval {
+            self.dir.write("streaming_interval", interval.to_string())?;
+        }
+        if let Some(max_burst) = self.builder.streaming_max_burst {
+            self.dir.write("streaming_maxburst", max_burst.to_string())?;
+        }
+        if let Some(max_packet) = self.builder.streaming_max_packet {
+            self.dir.write("streaming_maxpacket", max_packet.to_string())?;
+        }
+
+        Ok(())
+    }
+}
+
+/// USB Video Class (UVC) function.
+#[derive(Debug)]
+pub struct Uvc {
+    dir: FunctionDir,
+}
+
+impl Uvc {
+    /// Creates a new USB Video Class (UVC) builder with f_uvc video defaults.
+    pub fn builder() -> UvcBuilder {
+        UvcBuilder::default()
+    }
+
+    /// Creates a new USB Video Class (UVC) with the specified frames.
+    pub fn new<F>(frames: impl IntoIterator<Item = F>) -> (Uvc, Handle)
+    where
+        UvcFrame: From<F>,
+    {
+        let frames = frames.into_iter().map(UvcFrame::from).collect();
+        let builder = UvcBuilder { frames, ..Default::default() };
+        builder.build()
+    }
+
+    /// Access to registration status.
+    pub fn status(&self) -> Status {
+        self.dir.status()
+    }
+}
+
+fn remove_class_headers<P: AsRef<Path>>(path: P) -> Result<()> {
+    for entry in fs::read_dir(path)? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        let header_path = path.join("h");
+        if header_path.is_symlink() {
+            log::trace!("removing UVC header {:?}", path);
+            fs::remove_file(header_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_format_dirs(dir: &Path, format: &Format) -> Result<()> {
+    // remove header link first to allow removing frames
+    let header_link_path = dir.join(format.header_link_path());
+    if header_link_path.is_symlink() {
+        log::trace!("removing UVC header link {:?}", header_link_path);
+        fs::remove_file(header_link_path)?;
+    }
+
+    let color_matching_dir = dir.join(format.color_matching_path());
+    if color_matching_dir.is_dir() {
+        log::trace!("removing UVC color matching information {:?}", color_matching_dir);
+        let cm_link = dir.join(format.color_matching_link_path());
+        if cm_link.is_symlink() {
+            fs::remove_file(cm_link)?;
+        }
+        fs::remove_dir(color_matching_dir)?;
+    }
+
+    let group_dir = dir.join(format.group_path());
+    if group_dir.is_dir() {
+        for entry in fs::read_dir(&group_dir)? {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if path.is_dir() && !path.is_symlink() {
+                log::trace!("removing UVC frame {:?}", path);
+                fs::remove_dir(path)?;
+            }
+        }
+
+        log::trace!("removing UVC group {:?}", group_dir);
+        fs::remove_dir(group_dir)?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn remove_handler(dir: PathBuf) -> Result<()> {
+    // remove header links for control and streaming
+    let ctrl_class = dir.join("control/class");
+    if ctrl_class.is_dir() {
+        remove_class_headers(ctrl_class)?;
+    }
+    let stream_class = dir.join("streaming/class");
+    if stream_class.is_dir() {
+        remove_class_headers(stream_class)?;
+    }
+
+    // remove all UVC frames, color matching information and header links
+    if dir.join("streaming").is_dir() {
+        // Clean up known static formats.
+        for format in Format::all() {
+            remove_format_dirs(&dir, format)?;
+        }
+
+        // Clean up any framebased format directories that were created at runtime.
+        let framebased_dir = dir.join("streaming/framebased");
+        if framebased_dir.is_dir() {
+            for entry in fs::read_dir(&framebased_dir)? {
+                let Ok(entry) = entry else { continue };
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+
+                // Remove header link for this framebased format.
+                let header_link = dir.join(format!("streaming/header/h/{name_str}"));
+                if header_link.is_symlink() {
+                    log::trace!("removing UVC framebased header link {:?}", header_link);
+                    fs::remove_file(header_link)?;
+                }
+
+                // Remove color matching link and directory.
+                let cm_dir = dir.join(format!("streaming/color_matching/{name_str}"));
+                let cm_link = entry.path().join("color_matching");
+                if cm_link.is_symlink() {
+                    fs::remove_file(cm_link)?;
+                }
+                if cm_dir.is_dir() {
+                    fs::remove_dir(cm_dir)?;
+                }
+
+                // Remove frame subdirectories.
+                let group_path = entry.path();
+                if group_path.is_dir() && !group_path.is_symlink() {
+                    for frame_entry in fs::read_dir(&group_path)? {
+                        let Ok(frame_entry) = frame_entry else { continue };
+                        let path = frame_entry.path();
+                        if path.is_dir() && !path.is_symlink() {
+                            log::trace!("removing UVC framebased frame {:?}", path);
+                            fs::remove_dir(path)?;
+                        }
+                    }
+                    log::trace!("removing UVC framebased group {:?}", group_path);
+                    fs::remove_dir(group_path)?;
+                }
+            }
+        }
+    }
+
+    // finally remove header folders
+    let stream_header = dir.join("streaming/header/h");
+    if stream_header.is_dir() {
+        fs::remove_dir(stream_header)?;
+    }
+    let control_header = dir.join("control/header/h");
+    if control_header.is_dir() {
+        fs::remove_dir(control_header)?;
+    }
+
+    Ok(())
+}
