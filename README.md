@@ -22,10 +22,8 @@ Supported functions:
   `CONFIG_USB_CONFIGFS_F_FS` (FunctionFS, for the DFU function), plus the option
   for each configured function, e.g. `CONFIG_USB_CONFIGFS_ACM` (serial),
   `CONFIG_USB_CONFIGFS_NCM` (network), `CONFIG_USB_CONFIGFS_MASS_STORAGE`.
-- FunctionFS itself has existed since Linux 2.6.35, but this DFU function uses
-  a DFU functional descriptor through FunctionFS. Support for that specific
-  descriptor path is kernel-dependent; if enabling DFU makes gadget bind fail,
-  verify your target kernel's FunctionFS DFU support.
+- The DFU functional descriptor support in FunctionFS requires kernel 6.12 or
+  later, unless your kernel has backported support.
 - `configfs` mounted and root privileges to configure gadgets.
 - For SWUpdate downloads, a running SWUpdate daemon with its IPC socket
   available.

@@ -9,6 +9,7 @@ use usb_gadget::function::custom::{Custom, Event};
 
 fn is_terminal_event_error(err: &io::Error) -> bool {
     matches!(err.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::NotConnected)
+        || err.raw_os_error() == Some(43)
 }
 
 /// Event handler for a FunctionFS custom function.
