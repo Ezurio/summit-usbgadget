@@ -59,7 +59,7 @@ use crate::stream_download::DownloadTarget;
 use crate::swupdate::SwupdateParams;
 
 /// Top-level gadget configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GadgetConfig {
     /// Gadget name in configfs (defaults to the file stem when omitted).
     pub name: Option<String>,
@@ -104,7 +104,7 @@ pub enum UdcSelector {
 }
 
 /// Device-level configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DeviceConfig {
     /// Vendor ID.
     pub vendor: u16,
@@ -134,7 +134,7 @@ pub struct DeviceConfig {
 }
 
 /// A USB configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct UsbConfigConfig {
     /// Configuration description.
     pub description: Option<String>,
@@ -150,7 +150,7 @@ pub struct UsbConfigConfig {
 }
 
 /// A USB function specification, tagged by `type`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FunctionConfig {
     /// CDC ACM or generic serial port.
@@ -166,7 +166,7 @@ pub enum FunctionConfig {
 }
 
 /// Serial function configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SerialConfig {
     /// `"acm"` or `"generic"`.
     pub class: String,
@@ -175,7 +175,7 @@ pub struct SerialConfig {
 }
 
 /// Network function configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct NetConfig {
     /// `"ecm"`, `"ecm_subset"`, `"eem"`, `"ncm"`, or `"rndis"`.
     pub class: String,
@@ -200,7 +200,7 @@ pub struct NetConfig {
 }
 
 /// A mass-storage logical unit.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LunConfig {
     /// Backing file or block device.
     pub file: Option<String>,
@@ -217,7 +217,7 @@ pub struct LunConfig {
 }
 
 /// Mass-storage function configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MsdConfig {
     /// Stall on errors.
     pub stall: Option<bool>,
@@ -227,7 +227,7 @@ pub struct MsdConfig {
 }
 
 /// DFU function configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DfuFnConfig {
     /// `"swupdate"` (default) or `"file:/path"`.
     pub download: Option<String>,

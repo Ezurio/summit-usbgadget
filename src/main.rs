@@ -36,7 +36,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = config_path_from_args();
     log::info!("loading gadget configuration from {}", config_path.display());
-    let config = GadgetConfig::load(&config_path)?;
+    let config = match GadgetConfig::load(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            if let Err(reset_err) = gadget::reset() {
+                log::warn!("failed to remove gadgets after configuration load error: {reset_err}");
+            }
+            return Err(err.into());
+        }
+    };
 
     gadget::serve(config).await
 }

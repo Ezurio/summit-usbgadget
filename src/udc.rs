@@ -4,7 +4,7 @@
 //! USB device controller (UDC) discovery via udev.
 //!
 //! Existing controllers are enumerated through the `usb-gadget` crate, and new
-//! controllers are discovered by listening to udev `add` events on the `udc`
+//! controllers are discovered by listening to udev events on the `udc`
 //! subsystem (no polling). The set of controllers to bind is chosen from the
 //! configuration's [`UdcSelector`].
 
@@ -85,7 +85,7 @@ pub fn by_name(name: &OsStr) -> Option<Udc> {
     udcs().ok()?.into_iter().find(|u| u.name() == name)
 }
 
-/// Creates an async udev monitor for `add` events on the `udc` subsystem.
+/// Creates an async udev monitor used to watch controller-related udev events.
 pub fn monitor() -> io::Result<AsyncMonitorSocket> {
     let socket = MonitorBuilder::new()?.match_subsystem(SUBSYSTEM)?.listen()?;
     AsyncMonitorSocket::new(socket)

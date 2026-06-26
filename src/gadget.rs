@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 use std::error::Error;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use futures_util::StreamExt;
 use tokio_udev::EventType;
 use usb_gadget::function::{self, Handle};
-use usb_gadget::{remove_all, Class, Config, Gadget, Id, OsDescriptor, RegGadget, Strings, Udc};
+use usb_gadget::{registered, remove_all, Class, Config, Gadget, Id, OsDescriptor, RegGadget, Strings, Udc};
 
 use crate::config::{DfuFnConfig, FunctionConfig, GadgetConfig, MsdConfig, NetConfig, SerialConfig};
 #[cfg(feature = "dfu")]
@@ -128,6 +128,30 @@ pub fn reset() -> Result<(), Box<dyn Error>> {
 /// given controller. The gadget is named after the controller so multiple
 /// controllers can each host their own gadget.
 pub fn build_on_udc(cfg: &GadgetConfig, udc: &Udc) -> Result<RunningGadget, Box<dyn Error>> {
+    match build_on_udc_once(cfg, udc) {
+        Ok(running) => Ok(running),
+        Err(err) => {
+            let Some(filtered) = config_without_dfu(cfg, &*err) else {
+                return Err(err);
+            };
+
+            log::warn!(
+                "skipping unsupported DFU interface on UDC {} after registration failure: {err}",
+                udc.name().to_string_lossy()
+            );
+
+            build_on_udc_once(&filtered, udc).map_err(|retry_err| {
+                format!(
+                    "retry without DFU after registration failure on UDC {} also failed: {retry_err}",
+                    udc.name().to_string_lossy()
+                )
+                .into()
+            })
+        }
+    }
+}
+
+fn build_on_udc_once(cfg: &GadgetConfig, udc: &Udc) -> Result<RunningGadget, Box<dyn Error>> {
     let device = &cfg.device;
     let class =
         Class::new(device.class.unwrap_or(0), device.sub_class.unwrap_or(0), device.protocol.unwrap_or(0));
@@ -138,8 +162,9 @@ pub fn build_on_udc(cfg: &GadgetConfig, udc: &Udc) -> Result<RunningGadget, Box<
         &product_name,
         &serial_number,
     );
+    let gadget_name = udc.name().to_os_string();
     let mut gadget = Gadget::new(class, Id::new(device.vendor, device.product), strings);
-    gadget.name = Some(udc.name().to_string_lossy().into_owned());
+    gadget.name = Some(gadget_name.to_string_lossy().into_owned());
     if let Some(os_descriptor) = &cfg.os_descriptor {
         // Base the gadget OS descriptor on the crate's Microsoft defaults,
         // overriding individual fields only when the configuration sets them.
@@ -180,9 +205,36 @@ pub fn build_on_udc(cfg: &GadgetConfig, udc: &Udc) -> Result<RunningGadget, Box<
         gadget.configs.push(config);
     }
 
-    let reg = gadget.register()?;
-    apply_net_os_descriptors(&outputs.net_os)?;
-    reg.bind(Some(udc))?;
+    let reg = gadget.register().map_err(|err| {
+        cleanup_failed_registration_by_name(
+            &gadget_name,
+            format!(
+                "failed to register gadget for UDC {} before bind: {err}",
+                udc.name().to_string_lossy()
+            )
+            .into(),
+        )
+    })?;
+    if let Err(err) = apply_net_os_descriptors(&outputs.net_os).map_err(|err| {
+        format!(
+            "failed to finish gadget setup in configfs at {}: {err}",
+            reg.path().display()
+        )
+        .into()
+    }) {
+        return Err(cleanup_failed_registration(reg, err));
+    }
+
+    if let Err(err) = reg.bind(Some(udc)).map_err(|err| {
+        format!(
+            "failed to bind registered gadget at {} to UDC {}: {err}",
+            reg.path().display(),
+            udc.name().to_string_lossy()
+        )
+        .into()
+    }) {
+        return Err(cleanup_failed_registration(reg, err));
+    }
 
     log::info!(
         "gadget {:04x}:{:04x} (serial {serial_number}) bound to UDC {}",
@@ -208,6 +260,65 @@ pub fn build_on_udc(cfg: &GadgetConfig, udc: &Udc) -> Result<RunningGadget, Box<
             #[cfg(feature = "fbk")]
             fbk: outputs.fbk,
         })
+    }
+}
+
+fn config_without_dfu(cfg: &GadgetConfig, err: &dyn Error) -> Option<GadgetConfig> {
+    if !err.to_string().contains("FunctionFS") {
+        return None;
+    }
+
+    let mut filtered = cfg.clone();
+    let mut removed_dfu = false;
+
+    filtered.config.retain_mut(|usb_cfg| {
+        let original_len = usb_cfg.function.len();
+        usb_cfg.function.retain(|function| !matches!(function, FunctionConfig::Dfu(_)));
+        removed_dfu |= usb_cfg.function.len() != original_len;
+        !usb_cfg.function.is_empty()
+    });
+
+    if removed_dfu && !filtered.config.is_empty() {
+        Some(filtered)
+    } else {
+        None
+    }
+}
+
+fn cleanup_failed_registration(reg: RegGadget, err: Box<dyn Error>) -> Box<dyn Error> {
+    let gadget_name = reg.name().to_string_lossy().into_owned();
+    match reg.remove() {
+        Ok(()) => err,
+        Err(cleanup_err) => format!(
+            "{err}; additionally failed to remove partially registered gadget {gadget_name}: {cleanup_err}"
+        )
+        .into(),
+    }
+}
+
+fn cleanup_failed_registration_by_name(name: &OsStr, err: Box<dyn Error>) -> Box<dyn Error> {
+    let gadget_name = name.to_string_lossy().into_owned();
+
+    let gadgets = match registered() {
+        Ok(gadgets) => gadgets,
+        Err(cleanup_err) => {
+            return format!(
+                "{err}; additionally failed to enumerate registered gadgets while cleaning up partially registered gadget {gadget_name}: {cleanup_err}"
+            )
+            .into();
+        }
+    };
+
+    let Some(gadget) = gadgets.into_iter().find(|gadget| gadget.name() == name) else {
+        return err;
+    };
+
+    match gadget.remove() {
+        Ok(()) => err,
+        Err(cleanup_err) => format!(
+            "{err}; additionally failed to remove partially registered gadget {gadget_name}: {cleanup_err}"
+        )
+        .into(),
     }
 }
 
@@ -358,7 +469,8 @@ fn build_dfu(
 }
 
 /// Resets any existing gadget, then binds to all selected controllers —
-/// current and future — servicing udev `add` events until the stream ends.
+/// current and future — servicing relevant `udc` udev events until the stream
+/// ends.
 pub async fn serve(config: GadgetConfig) -> Result<(), Box<dyn Error>> {
     reset()?;
 
@@ -372,9 +484,7 @@ pub async fn serve(config: GadgetConfig) -> Result<(), Box<dyn Error>> {
     let mut gadgets: Vec<RunningGadget> = Vec::new();
     let mut bound: HashSet<OsString> = HashSet::new();
 
-    for name in udc::existing() {
-        bind_one(&config, &selection, &mut bound, &mut gadgets, name);
-    }
+    bind_existing(&config, &selection, &mut bound, &mut gadgets);
 
     if !selection.wants_more(&bound) {
         log::info!("all selected controllers are bound");
@@ -390,13 +500,32 @@ pub async fn serve(config: GadgetConfig) -> Result<(), Box<dyn Error>> {
                 continue;
             }
         };
-        if event.event_type() != EventType::Add {
+        let Some(name) = udc_name_from_event(&event) else {
             continue;
-        }
-        bind_one(&config, &selection, &mut bound, &mut gadgets, event.sysname().to_os_string());
+        };
+        bind_one(&config, &selection, &mut bound, &mut gadgets, name);
     }
 
     Ok(())
+}
+
+fn bind_existing(
+    config: &GadgetConfig,
+    selection: &Selection,
+    bound: &mut HashSet<OsString>,
+    gadgets: &mut Vec<RunningGadget>,
+) {
+    for name in udc::existing() {
+        bind_one(config, selection, bound, gadgets, name);
+    }
+}
+
+fn udc_name_from_event(event: &tokio_udev::Event) -> Option<OsString> {
+    if matches!(event.event_type(), EventType::Add) {
+        Some(event.sysname().to_os_string())
+    } else {
+        None
+    }
 }
 
 /// Builds and binds a gadget on controller `name` if the selection allows it.

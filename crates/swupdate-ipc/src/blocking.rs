@@ -169,14 +169,6 @@ pub fn await_install_result(timeout: Duration) -> Result<()> {
     }
 }
 
-/// Requests a system restart through SWUpdate (`SWUPDATE_SYSRESTART`).
-pub fn sysrestart() -> Result<()> {
-    let mut stream = connect_ctrl()?;
-    let msg = IpcMessage::new(MsgType::SysRestart);
-    write_message(&mut stream, &msg)?;
-    Ok(())
-}
-
 /// Runs a post-update action, equivalent to `ipc_postupdate`. The optional
 /// `info` payload is forwarded in the `procmsg` buffer. Returns the daemon's
 /// reply frame.
@@ -186,7 +178,7 @@ pub fn postupdate(info: &[u8]) -> Result<IpcMessage> {
     unsafe {
         let len = info.len().min(msg.data.procmsg.buf.len());
         for (slot, &byte) in msg.data.procmsg.buf.iter_mut().zip(info.iter()).take(len) {
-            *slot = byte as libc::c_char;
+            *slot = byte as std::ffi::c_char;
         }
         msg.data.procmsg.len = len as u32;
     }
