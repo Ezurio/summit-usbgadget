@@ -123,21 +123,7 @@ impl Dfu {
             }
             request::ABORT => {
                 log::debug!("DFU_ABORT");
-                if let Some(task) = self.manifest_task.take() {
-                    task.abort();
-                }
-                if let Some(sink) = self.sink.as_mut() {
-                    if sink.is_active() {
-                        sink.abort().await;
-                    }
-                }
-                self.sink = Some(ActiveDownload::new(self.download.clone()));
-                self.status = Status::Ok;
-                self.state = State::DfuIdle;
-                self.download_tail.clear();
-                self.download_crc = Hasher::new();
-                self.upload_file = None;
-                self.upload_buf.clear();
+                self.abort_transfer().await;
                 Ok(())
             }
             other => {
@@ -146,6 +132,24 @@ impl Dfu {
                 Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported DFU request"))
             }
         }
+    }
+
+    pub(crate) async fn abort_transfer(&mut self) {
+        if let Some(task) = self.manifest_task.take() {
+            task.abort();
+        }
+        if let Some(sink) = self.sink.as_mut() {
+            if sink.is_active() {
+                sink.abort().await;
+            }
+        }
+        self.sink = Some(ActiveDownload::new(self.download.clone()));
+        self.status = Status::Ok;
+        self.state = State::DfuIdle;
+        self.download_tail.clear();
+        self.download_crc = Hasher::new();
+        self.upload_file = None;
+        self.upload_buf.clear();
     }
 
     /// Handles a device-to-host DFU control request, returning the response
@@ -320,6 +324,7 @@ impl Dfu {
             }
         }
     }
+
 }
 
 /// Reads into `buf` until it is full or end-of-file is reached, returning the

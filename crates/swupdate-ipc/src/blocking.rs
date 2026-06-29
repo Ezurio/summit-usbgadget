@@ -119,11 +119,12 @@ pub fn get_status_timeout(timeout: Duration) -> Result<Option<IpcMessage>> {
 /// Waits for a terminal SWUpdate install result within `timeout`, using the
 /// control status socket.
 ///
-/// Returns `Ok(())` on success once SWUpdate is no longer in an active install
-/// state and `last_result=Success`, `Err(Error::InstallFailed)` on failure,
-/// and `Err(Error::Timeout)` if the deadline elapses.
+/// Returns `Ok(())` once SWUpdate has reported success and then later
+/// returned to `Idle`, `Err(Error::InstallFailed)` on terminal failure, and
+/// `Err(Error::Timeout)` if the deadline elapses.
 pub fn await_install_result(timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
+    let mut saw_success = false;
 
     loop {
         let now = Instant::now();
@@ -133,12 +134,13 @@ pub fn await_install_result(timeout: Duration) -> Result<()> {
 
         let poll_timeout = deadline.saturating_duration_since(now).min(STATUS_POLL_INTERVAL);
 
-        let msg = match get_status_timeout(poll_timeout)? {
-            Some(msg) => msg,
-            None => {
+        let msg = match get_status_timeout(poll_timeout) {
+            Ok(Some(msg)) => msg,
+            Ok(None) | Err(Error::Closed) => {
                 thread::sleep(STATUS_POLL_INTERVAL);
                 continue;
             }
+            Err(err) => return Err(err),
         };
 
         // SAFETY: get_status replies always use the `status` union member.
@@ -148,6 +150,23 @@ pub fn await_install_result(timeout: Duration) -> Result<()> {
 
         let current = RecoveryStatus::try_from(current_raw).ok();
         let last_result = RecoveryStatus::try_from(last_result_raw).ok();
+
+        match current {
+            Some(RecoveryStatus::Success) => {
+                saw_success = true;
+                continue;
+            }
+            Some(RecoveryStatus::Failure) => return Err(Error::InstallFailed),
+            _ => {}
+        }
+
+        if last_result == Some(RecoveryStatus::Failure) {
+            return Err(Error::InstallFailed);
+        }
+
+        if saw_success && current == Some(RecoveryStatus::Idle) {
+            return Ok(());
+        }
 
         let active = matches!(
             current,
@@ -159,10 +178,8 @@ pub fn await_install_result(timeout: Duration) -> Result<()> {
         );
 
         if !active {
-            match last_result {
-                Some(RecoveryStatus::Success) => return Ok(()),
-                Some(RecoveryStatus::Failure) => return Err(Error::InstallFailed),
-                _ => {}
+            if last_result == Some(RecoveryStatus::Success) {
+                saw_success = true;
             }
         }
 

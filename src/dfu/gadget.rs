@@ -17,6 +17,11 @@ use crate::functionfs::EventHandler;
 
 use super::{Dfu, DfuConfig};
 
+fn is_closed_control_path(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::NotConnected
+        || err.raw_os_error() == Some(rustix::io::Errno::SHUTDOWN.raw_os_error())
+}
+
 /// The DFU runtime pieces needed to service control requests after binding.
 #[derive(Debug)]
 pub struct DfuRuntime {
@@ -61,7 +66,23 @@ impl EventHandler for Dfu {
                     log::debug!("ignoring non-DFU OUT request {:#04x}", ctrl.request);
                     return Ok(());
                 }
-                let data = req.recv_all_async().await?;
+                let data = if req.is_empty() {
+                    let mut probe = [0u8; 1];
+                    match req.recv_async(&mut probe).await {
+                        Ok(_) => Vec::new(),
+                        Err(err) if is_closed_control_path(&err) => Vec::new(),
+                        Err(err) => return Err(err),
+                    }
+                } else {
+                    match req.recv_all_async().await {
+                        Ok(data) => data,
+                        Err(err) if is_closed_control_path(&err) => {
+                            self.abort_transfer().await;
+                            return Ok(());
+                        }
+                        Err(err) => return Err(err),
+                    }
+                };
                 self.handle_out(&ctrl, &data).await
             }
             Event::SetupDeviceToHost(req) => {
@@ -71,7 +92,12 @@ impl EventHandler for Dfu {
                     return Ok(());
                 }
                 let response = self.handle_in(&ctrl).await?;
-                req.send_async(response.as_slice()).await?;
+                if let Err(err) = req.send_async(response.as_slice()).await {
+                    if is_closed_control_path(&err) {
+                        return Ok(());
+                    }
+                    return Err(err);
+                }
                 Ok(())
             }
             Event::Enable => {

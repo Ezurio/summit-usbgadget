@@ -7,9 +7,28 @@ use std::io;
 
 use usb_gadget::function::custom::{Custom, Event};
 
-fn is_terminal_event_error(err: &io::Error) -> bool {
-    matches!(err.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::NotConnected)
-        || err.raw_os_error() == Some(43)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorSource {
+    WaitEvent,
+    Event,
+    HandleEvent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorAction {
+    Continue,
+    Log,
+}
+
+fn classify_error(source: ErrorSource, err: &io::Error) -> ErrorAction {
+    if err.kind() != io::ErrorKind::NotConnected {
+        return ErrorAction::Log;
+    }
+
+    match source {
+        ErrorSource::HandleEvent => ErrorAction::Continue,
+        ErrorSource::WaitEvent | ErrorSource::Event => ErrorAction::Continue,
+    }
 }
 
 /// Event handler for a FunctionFS custom function.
@@ -29,30 +48,38 @@ pub(crate) async fn serve<H>(
     log::info!("[{udc_name}] servicing {label}");
     loop {
         if let Err(err) = custom.wait_event().await {
-            if is_terminal_event_error(&err) {
-                log::info!("[{udc_name}] stopping {label}: {err}");
-                break;
+            match classify_error(ErrorSource::WaitEvent, &err) {
+                ErrorAction::Continue => continue,
+                ErrorAction::Log => {
+                    log::debug!("[{udc_name}] {label} wait_event error: {err}");
+                    continue;
+                }
             }
-
-            log::debug!("[{udc_name}] {label} wait_event error: {err}");
-            continue;
         }
 
         let event = match custom.event() {
             Ok(event) => event,
             Err(err) => {
-                if is_terminal_event_error(&err) {
-                    log::info!("[{udc_name}] stopping {label}: {err}");
-                    break;
+                match classify_error(ErrorSource::Event, &err) {
+                    ErrorAction::Continue => continue,
+                    ErrorAction::Log => {
+                        log::error!("[{udc_name}] {label} event error: {err}");
+                        continue;
+                    }
                 }
-
-                log::error!("[{udc_name}] {label} event error: {err}");
-                continue;
             }
         };
 
         if let Err(err) = handler.handle_event(&udc_name, event).await {
-            log::error!("[{udc_name}] error handling {label} event: {err}");
+            match classify_error(ErrorSource::HandleEvent, &err) {
+                ErrorAction::Continue => {
+                    log::info!("[{udc_name}] {label} handler saw closed transport: {err}");
+                    continue;
+                }
+                ErrorAction::Log => {
+                    log::error!("[{udc_name}] error handling {label} event: {err}");
+                }
+            }
         }
     }
 }

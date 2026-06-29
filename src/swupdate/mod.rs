@@ -15,11 +15,38 @@ mod ipc;
 mod pipe;
 
 use std::io;
+use std::time::Duration;
 
+use rustix::fs;
+use rustix::system::{self, RebootCommand};
+use tokio::time::sleep;
 use ipc::IpcSink;
 use pipe::PipeSink;
 
 pub use ipc::SwupdateParams;
+
+const REBOOT_DELAY: Duration = Duration::from_secs(5);
+
+fn is_complete_update(params: &SwupdateParams) -> bool {
+    matches!(params.image_mode.as_deref(), Some("complete"))
+}
+
+pub(super) async fn on_update_success(params: &SwupdateParams, force_complete: bool) {
+    if force_complete || is_complete_update(params) {
+        log::info!("SWUpdate complete update succeeded; skipping local restart");
+        return;
+    }
+
+    log::info!("SWUpdate update succeeded; scheduling local restart in {REBOOT_DELAY:?}");
+    tokio::spawn(async {
+        sleep(REBOOT_DELAY).await;
+        log::info!("SWUpdate reboot delay elapsed; syncing filesystems before local restart");
+        fs::sync();
+        if let Err(err) = system::reboot(RebootCommand::Restart) {
+            log::error!("local reboot failed: {err}");
+        }
+    });
+}
 
 /// Active transport during a download, selected by the boot context.
 enum Transport {
@@ -73,7 +100,11 @@ impl SwupdateSink {
     pub(crate) async fn finish(&mut self) -> io::Result<()> {
         match self.transport.take() {
             Some(Transport::Ipc(sink)) => sink.finish(self.params.timeout).await,
-            Some(Transport::Pipe(sink)) => sink.finish(self.params.timeout).await,
+            Some(Transport::Pipe(sink)) => {
+                sink.finish(self.params.timeout).await?;
+                on_update_success(&self.params, true).await;
+                Ok(())
+            }
             None => Ok(()),
         }
     }

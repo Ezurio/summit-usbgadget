@@ -9,15 +9,26 @@
 use std::io;
 use std::time::Duration;
 
-use rustix::fs;
-use rustix::system::{self, RebootCommand};
+use rustix::io::Errno;
 use swupdate_ipc::r#async as swu;
+use swupdate_ipc::Error as SwupdateError;
 use swupdate_ipc::{RunType, SourceType, SwupdateRequest};
-use tokio::time::sleep;
+use tokio::io::AsyncWriteExt;
 
 use crate::sysinfo::BootRootfsInfo;
 
-const REBOOT_DELAY: Duration = Duration::from_secs(5);
+fn normalize_ipc_error(err: SwupdateError, context: &str) -> io::Error {
+    match err {
+        SwupdateError::Io(io_err)
+            if io_err.raw_os_error() == Some(Errno::SHUTDOWN.raw_os_error())
+                || io_err.raw_os_error() == Some(Errno::CONNABORTED.raw_os_error()) =>
+        {
+            io::Error::new(io::ErrorKind::NotConnected, io_err)
+        }
+        SwupdateError::Closed => io::Error::new(io::ErrorKind::NotConnected, err),
+        other => io::Error::other(format!("SWUpdate {context} failed: {other}")),
+    }
+}
 
 /// Parameters for an SWUpdate-backed download.
 #[derive(Debug, Clone)]
@@ -53,6 +64,7 @@ impl Default for SwupdateParams {
 /// Active SWUpdate IPC transport.
 pub(super) struct IpcSink {
     conn: swu::InstallConn,
+    params: SwupdateParams,
 }
 
 impl IpcSink {
@@ -77,36 +89,31 @@ impl IpcSink {
             .map_err(|e| io::Error::other(format!("SWUpdate inst_start failed: {e}")))?;
         log::info!("SWUpdate install started; streaming firmware");
 
-        Ok(Self { conn })
+        Ok(Self { conn, params: params.clone() })
     }
 
     pub(super) async fn write_block(&mut self, data: &[u8]) -> io::Result<()> {
         self.conn
             .send_data(data)
             .await
-            .map_err(|e| io::Error::other(format!("SWUpdate send failed: {e}")))
+            .map_err(|err| normalize_ipc_error(err, "send"))
     }
 
-    pub(super) async fn finish(self, timeout: Duration) -> io::Result<()> {
-        let Self { conn } = self;
+    pub(super) async fn finish(self, _timeout: Duration) -> io::Result<()> {
+        let Self { conn, params } = self;
         conn.end()
             .await
-            .map_err(|e| io::Error::other(format!("SWUpdate end failed: {e}")))?;
-        swu::await_install_result(timeout)
+            .map_err(|err| normalize_ipc_error(err, "end"))?;
+        swu::await_install_result(params.timeout)
             .await
-            .map_err(|e| io::Error::other(format!("SWUpdate wait failed: {e}")))?;
-        tokio::spawn(async {
-            sleep(REBOOT_DELAY).await;
-            log::info!("SWUpdate install succeeded; syncing filesystems before local restart");
-            fs::sync();
-            if let Err(err) = system::reboot(RebootCommand::Restart) {
-                log::error!("local reboot failed: {err}");
-            }
-        });
+            .map_err(|err| normalize_ipc_error(err, "wait"))?;
+        super::on_update_success(&params, false).await;
         Ok(())
     }
 
     pub(super) async fn abort(self) {
-        // Dropping the install connection closes the socket.
+        let Self { conn, .. } = self;
+        let mut stream = conn.into_stream();
+        let _ = stream.shutdown().await;
     }
 }
