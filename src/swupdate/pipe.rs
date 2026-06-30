@@ -11,8 +11,9 @@ use std::io;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
+
+use super::PendingWriter;
 
 fn normalize_pipe_error(err: io::Error) -> io::Error {
     if err.kind() == io::ErrorKind::BrokenPipe {
@@ -24,7 +25,7 @@ fn normalize_pipe_error(err: io::Error) -> io::Error {
 
 /// Active `fw_update` pipe transport: stdin handle plus the child process.
 pub(super) struct PipeSink {
-    stdin: ChildStdin,
+    stdin: PendingWriter<ChildStdin>,
     child: Child,
 }
 
@@ -35,6 +36,7 @@ impl PipeSink {
         log::info!("pipe boot: streaming firmware through fw_update -m {image_mode}");
         let mut child = Command::new("fw_update")
             .args(["-x", "r", "-m", image_mode, "-"])
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -44,16 +46,16 @@ impl PipeSink {
             .stdin
             .take()
             .ok_or_else(|| io::Error::other("failed to open fw_update stdin"))?;
-        Ok(Self { stdin, child })
+        Ok(Self { stdin: PendingWriter::new(stdin), child })
     }
 
     pub(super) async fn write_block(&mut self, data: &[u8]) -> io::Result<()> {
-        self.stdin.write_all(data).await.map_err(normalize_pipe_error)
+        self.stdin.write_block(data).await.map_err(normalize_pipe_error)
     }
 
     pub(super) async fn finish(mut self, timeout: Duration) -> io::Result<()> {
-        self.stdin.flush().await.map_err(normalize_pipe_error)?;
-        drop(self.stdin); // EOF → fw_update
+        self.stdin.flush_pending().await.map_err(normalize_pipe_error)?;
+        drop(self.stdin.into_inner()); // EOF → fw_update
         match tokio::time::timeout(timeout, self.child.wait()).await {
             Ok(Ok(s)) if s.success() => {
                 log::info!("fw_update completed successfully");
@@ -69,7 +71,15 @@ impl PipeSink {
     }
 
     pub(super) async fn abort(mut self) {
-        drop(self.stdin);
+        drop(self.stdin.into_inner());
         let _ = self.child.kill().await;
+    }
+
+    pub(super) fn is_busy(&self) -> bool {
+        self.stdin.is_busy()
+    }
+
+    pub(super) async fn poll_progress(&mut self) -> io::Result<()> {
+        self.stdin.poll_progress().await.map_err(normalize_pipe_error)
     }
 }

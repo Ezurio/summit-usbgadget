@@ -65,6 +65,20 @@ impl DownloadSession {
             Self::Swupdate(s) => s.abort().await,
         }
     }
+
+    pub(crate) fn is_busy(&self) -> bool {
+        match self {
+            Self::File(_) => false,
+            Self::Swupdate(s) => s.is_busy(),
+        }
+    }
+
+    pub(crate) async fn poll_progress(&mut self) -> io::Result<()> {
+        match self {
+            Self::File(_) => Ok(()),
+            Self::Swupdate(s) => s.poll_progress().await,
+        }
+    }
 }
 
 /// Active streamed-download state reused by DFU and FBK.
@@ -81,6 +95,17 @@ impl ActiveDownload {
 
     pub(crate) fn is_active(&self) -> bool {
         self.session.is_some()
+    }
+
+    pub(crate) fn is_busy(&self) -> bool {
+        self.session.as_ref().is_some_and(DownloadSession::is_busy)
+    }
+
+    pub(crate) async fn poll_progress(&mut self) -> io::Result<()> {
+        if let Some(session) = self.session.as_mut() {
+            session.poll_progress().await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn begin(&mut self) -> io::Result<()> {

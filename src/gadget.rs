@@ -551,16 +551,17 @@ fn bind_one(
             #[cfg(feature = "dfu")]
             if let Some(dfu_runtime) = running.take_dfu() {
                 let udc_name = name.to_string_lossy().into_owned();
-                tokio::spawn(crate::dfu::serve(udc_name, dfu_runtime));
+                drop(tokio::spawn(crate::dfu::serve(udc_name, dfu_runtime)));
             }
 
             #[cfg(feature = "fbk")]
             if let Some(fbk_runtime) = running.take_fbk() {
                 let udc_name = name.to_string_lossy().into_owned();
-                tokio::spawn(crate::fbk::serve(udc_name, fbk_runtime));
+                drop(tokio::spawn(crate::fbk::serve(udc_name, fbk_runtime)));
             }
             gadgets.push(running);
-            bound.insert(name);
+            let inserted = bound.insert(name);
+            debug_assert!(inserted);
         }
         Err(err) => log::error!("failed to bind gadget on UDC {}: {err}", name.to_string_lossy()),
     }

@@ -47,7 +47,15 @@ crc32fast = "1.5"
 rustix = { version = "1.1.4", features = ["fs", "system"] }
 
 [lints.rust]
+unsafe_code = "deny"
+unused_results = "deny"
 warnings = "deny"
+unnameable_types = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
 
 [profile.dev]
 incremental = true

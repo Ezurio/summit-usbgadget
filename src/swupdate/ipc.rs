@@ -17,6 +17,8 @@ use tokio::io::AsyncWriteExt;
 
 use crate::sysinfo::BootRootfsInfo;
 
+use super::PendingWriter;
+
 fn normalize_ipc_error(err: SwupdateError, context: &str) -> io::Error {
     match err {
         SwupdateError::Io(io_err)
@@ -63,7 +65,7 @@ impl Default for SwupdateParams {
 
 /// Active SWUpdate IPC transport.
 pub(super) struct IpcSink {
-    conn: swu::InstallConn,
+    conn: PendingWriter<swu::InstallConn>,
     params: SwupdateParams,
 }
 
@@ -89,18 +91,23 @@ impl IpcSink {
             .map_err(|e| io::Error::other(format!("SWUpdate inst_start failed: {e}")))?;
         log::info!("SWUpdate install started; streaming firmware");
 
-        Ok(Self { conn, params: params.clone() })
+        Ok(Self { conn: PendingWriter::new(conn), params: params.clone() })
     }
 
     pub(super) async fn write_block(&mut self, data: &[u8]) -> io::Result<()> {
         self.conn
-            .send_data(data)
+            .write_block(data)
             .await
-            .map_err(|err| normalize_ipc_error(err, "send"))
+            .map_err(|err| io::Error::other(format!("SWUpdate send failed: {err}")))
     }
 
     pub(super) async fn finish(self, _timeout: Duration) -> io::Result<()> {
         let Self { conn, params } = self;
+        let mut conn = conn;
+        conn.flush_pending()
+            .await
+            .map_err(|err| normalize_ipc_error(SwupdateError::from(err), "send"))?;
+        let conn = conn.into_inner();
         conn.end()
             .await
             .map_err(|err| normalize_ipc_error(err, "end"))?;
@@ -113,7 +120,15 @@ impl IpcSink {
 
     pub(super) async fn abort(self) {
         let Self { conn, .. } = self;
-        let mut stream = conn.into_stream();
+        let mut stream = conn.into_inner().into_stream();
         let _ = stream.shutdown().await;
+    }
+
+    pub(super) fn is_busy(&self) -> bool {
+        self.conn.is_busy()
+    }
+
+    pub(super) async fn poll_progress(&mut self) -> io::Result<()> {
+        self.conn.poll_progress().await.map_err(|err| normalize_ipc_error(SwupdateError::from(err), "send"))
     }
 }

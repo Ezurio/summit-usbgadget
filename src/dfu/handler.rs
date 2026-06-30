@@ -3,14 +3,16 @@
 //
 //! The DFU state machine driven from endpoint zero.
 
+use std::future::Future;
+use std::future::poll_fn;
 use std::io::{self, SeekFrom};
+use std::pin::Pin;
+use std::task::Poll;
 
 use bytes::Bytes;
 use crc32fast::Hasher;
-use futures_util::FutureExt;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::task::JoinHandle;
 
 use usb_gadget::function::custom::CtrlReq;
 
@@ -21,9 +23,11 @@ use super::protocol::{request, GetStatus, State, Status};
 
 const DFU_SUFFIX_LEN: usize = 16;
 
+type ManifestFuture = Pin<Box<dyn Future<Output = (ActiveDownload, io::Result<()>)> + Send>>;
+
 /// Payload returned for a DFU device-to-host control request.
 #[derive(Debug, Clone)]
-pub enum InReply {
+pub(crate) enum InReply {
     /// Small fixed-size payload stored inline (no heap allocation).
     Inline { buf: [u8; 6], len: usize },
     /// Variable-size payload backed by shared bytes.
@@ -32,7 +36,7 @@ pub enum InReply {
 
 impl InReply {
     /// Returns the payload as bytes.
-    pub fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_slice(&self) -> &[u8] {
         match self {
             InReply::Inline { buf, len } => &buf[..*len],
             InReply::Data(data) => data.as_ref(),
@@ -55,7 +59,6 @@ pub fn is_dfu_request(req: &CtrlReq) -> bool {
 }
 
 /// The DFU state machine and active firmware sink.
-#[derive(Debug)]
 pub struct Dfu {
     transfer_size: u16,
     poll_timeout_ms: u32,
@@ -66,7 +69,7 @@ pub struct Dfu {
     upload_file: Option<File>,
     upload_buf: Vec<u8>,
     sink: Option<ActiveDownload>,
-    manifest_task: Option<JoinHandle<(ActiveDownload, io::Result<()>)>>,
+    manifest_future: Option<ManifestFuture>,
     state: State,
     status: Status,
 }
@@ -86,15 +89,16 @@ impl Dfu {
             upload_file: None,
             upload_buf: Vec::new(),
             sink: Some(sink),
-            manifest_task: None,
+            manifest_future: None,
             state: State::DfuIdle,
             status: Status::Ok,
         }
     }
 
     /// Handles a host-to-device DFU control request and its payload.
-    pub async fn handle_out(&mut self, req: &CtrlReq, data: &[u8]) -> io::Result<()> {
-        self.poll_manifest();
+    pub(crate) async fn handle_out(&mut self, req: &CtrlReq, data: &[u8]) -> io::Result<()> {
+        self.poll_download_progress().await?;
+        self.poll_manifest().await;
 
         match req.request {
             request::DETACH => {
@@ -115,10 +119,14 @@ impl Dfu {
             }
             request::CLRSTATUS => {
                 log::debug!("DFU_CLRSTATUS");
-                self.status = Status::Ok;
-                self.state = State::DfuIdle;
-                self.download_tail.clear();
-                self.download_crc = Hasher::new();
+                if self.state == State::Error || self.manifest_future.is_some() || self.sink.is_none() {
+                    self.abort_transfer().await;
+                } else {
+                    self.status = Status::Ok;
+                    self.state = State::DfuIdle;
+                    self.download_tail.clear();
+                    self.download_crc = Hasher::new();
+                }
                 Ok(())
             }
             request::ABORT => {
@@ -135,9 +143,7 @@ impl Dfu {
     }
 
     pub(crate) async fn abort_transfer(&mut self) {
-        if let Some(task) = self.manifest_task.take() {
-            task.abort();
-        }
+        self.manifest_future = None;
         if let Some(sink) = self.sink.as_mut() {
             if sink.is_active() {
                 sink.abort().await;
@@ -154,8 +160,9 @@ impl Dfu {
 
     /// Handles a device-to-host DFU control request, returning the response
     /// payload to send back to the host.
-    pub async fn handle_in(&mut self, req: &CtrlReq) -> io::Result<InReply> {
-        self.poll_manifest();
+    pub(crate) async fn handle_in(&mut self, req: &CtrlReq) -> io::Result<InReply> {
+        self.poll_download_progress().await?;
+        self.poll_manifest().await;
 
         match req.request {
             request::GETSTATUS => Ok(self.get_status()),
@@ -188,7 +195,7 @@ impl Dfu {
             sink.write_block(&tail).await?;
         }
 
-        self.manifest_task = Some(tokio::spawn(async move {
+        self.manifest_future = Some(Box::pin(async move {
             let result = sink.finish().await;
             (sink, result)
         }));
@@ -199,7 +206,13 @@ impl Dfu {
     /// of the state machine.
     fn get_status(&mut self) -> InReply {
         self.state = match self.state {
-            State::DnloadSync => State::DnloadIdle,
+            State::DnloadSync | State::DnBusy => {
+                if self.download_is_busy() {
+                    State::DnBusy
+                } else {
+                    State::DnloadIdle
+                }
+            }
             // Manifestation is performed during the zero-length DNLOAD, so it is
             // complete when the background manifestation task reports success.
             State::ManifestSync => State::DfuIdle,
@@ -248,7 +261,7 @@ impl Dfu {
                     self.upload_file = Some(File::open(&path).await?);
                 }
                 let file = self.upload_file.as_mut().expect("upload file just set");
-                file.seek(SeekFrom::Start(offset)).await?;
+                let _ = file.seek(SeekFrom::Start(offset)).await?;
                 self.upload_buf.resize(transfer_size, 0);
                 let n = read_full(file, &mut self.upload_buf).await?;
                 self.upload_buf.truncate(n);
@@ -275,6 +288,10 @@ impl Dfu {
         self.state = State::Error;
     }
 
+    fn download_is_busy(&self) -> bool {
+        self.sink.as_ref().is_some_and(ActiveDownload::is_busy)
+    }
+
     async fn write_dnload_block(&mut self, data: &[u8]) -> io::Result<()> {
         if self.sink.is_none() {
             return Err(io::Error::other("manifestation in progress"));
@@ -293,33 +310,40 @@ impl Dfu {
         sink.write_block(&prefix).await
     }
 
+    async fn poll_download_progress(&mut self) -> io::Result<()> {
+        if let Some(sink) = self.sink.as_mut() {
+            sink.poll_progress().await?;
+        }
+        Ok(())
+    }
+
     /// Checks whether the asynchronous manifestation task finished, then folds
     /// its outcome back into the DFU state machine.
-    fn poll_manifest(&mut self) {
-        let Some(task) = self.manifest_task.as_mut() else {
+    async fn poll_manifest(&mut self) {
+        let Some(future) = self.manifest_future.as_mut() else {
             return;
         };
 
-        let Some(joined) = task.now_or_never() else {
+        let joined = poll_fn(|cx| match future.as_mut().poll(cx) {
+            Poll::Ready(joined) => Poll::Ready(Some(joined)),
+            Poll::Pending => Poll::Ready(None),
+        })
+        .await;
+        let Some(joined) = joined else {
             return;
         };
-        self.manifest_task = None;
+        self.manifest_future = None;
         self.download_crc = Hasher::new();
 
         match joined {
-            Ok((sink, Ok(()))) => {
+            (sink, Ok(())) => {
                 self.sink = Some(sink);
                 self.status = Status::Ok;
                 self.state = State::ManifestSync;
             }
-            Ok((sink, Err(err))) => {
+            (sink, Err(err)) => {
                 self.sink = Some(sink);
                 log::error!("manifestation failed: {err}");
-                self.fault(Status::ErrVerify);
-            }
-            Err(err) => {
-                log::error!("manifestation task failed: {err}");
-                self.sink = Some(ActiveDownload::new(self.download.clone()));
                 self.fault(Status::ErrVerify);
             }
         }
@@ -365,9 +389,29 @@ fn has_valid_dfu_suffix(prefix_crc: &Hasher, buf: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crc32fast::Hasher;
+    use std::future::pending;
 
-    use super::{DFU_SUFFIX_LEN, has_valid_dfu_suffix, take_suffix_prefix};
+    use crc32fast::Hasher;
+    use usb_gadget::function::custom::CtrlReq;
+
+    use crate::dfu::config::DfuConfig;
+    use crate::dfu::protocol::{request, State, Status};
+    use crate::stream_download::DownloadTarget;
+
+    use super::{DFU_SUFFIX_LEN, Dfu, has_valid_dfu_suffix, take_suffix_prefix};
+
+    fn test_config() -> DfuConfig {
+        DfuConfig {
+            download: DownloadTarget::File(std::env::temp_dir().join("summit-usbgadget-dfu-test.bin")),
+            upload: None,
+            transfer_size: 4096,
+            poll_timeout_ms: 10,
+        }
+    }
+
+    fn out_req(request: u8) -> CtrlReq {
+        CtrlReq { request_type: 0x21, request, value: 0, index: 0, length: 0 }
+    }
 
     #[test]
     fn valid_dfu_suffix_is_recognized() {
@@ -411,5 +455,30 @@ mod tests {
         let prefix = take_suffix_prefix(&mut buf).expect("prefix should be emitted");
         assert_eq!(prefix, vec![0, 1, 2, 3]);
         assert_eq!(buf, (4u8..20).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn get_status_reports_dnbusy_when_buffer_limit_is_reached() {
+        let mut dfu = Dfu::new(test_config());
+        dfu.sink = None;
+        dfu.state = State::DnloadSync;
+        dfu.status = Status::Ok;
+        assert_eq!(dfu.get_status().as_slice()[4], State::DnloadIdle as u8);
+    }
+
+    #[tokio::test]
+    async fn clrstatus_resets_stale_manifestation_state() {
+        let mut dfu = Dfu::new(test_config());
+        dfu.sink = None;
+        dfu.manifest_future = Some(Box::pin(pending()));
+        dfu.state = State::Error;
+        dfu.status = Status::ErrVerify;
+
+        dfu.handle_out(&out_req(request::CLRSTATUS), &[]).await.expect("clrstatus should succeed");
+
+        assert!(dfu.sink.is_some());
+        assert!(dfu.manifest_future.is_none());
+        assert_eq!(dfu.state, State::DfuIdle);
+        assert_eq!(dfu.status, Status::Ok);
     }
 }

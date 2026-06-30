@@ -20,8 +20,14 @@ pub(crate) enum ErrorAction {
     Log,
 }
 
+pub(crate) fn is_closed_transport_error(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::NotConnected
+        || err.raw_os_error() == Some(rustix::io::Errno::IDRM.raw_os_error())
+        || err.raw_os_error() == Some(rustix::io::Errno::SHUTDOWN.raw_os_error())
+}
+
 fn classify_error(source: ErrorSource, err: &io::Error) -> ErrorAction {
-    if err.kind() != io::ErrorKind::NotConnected {
+    if !is_closed_transport_error(err) {
         return ErrorAction::Log;
     }
 

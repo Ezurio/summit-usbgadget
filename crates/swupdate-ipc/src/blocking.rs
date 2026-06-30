@@ -23,6 +23,7 @@ use crate::socket::{ctrl_socket_path, progress_socket_path};
 const PROGRESS_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRESS_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 const PROGRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const STATUS_UNCHANGED_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Delay between control-socket status polls in [`await_install_result`].
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -125,6 +126,10 @@ pub fn get_status_timeout(timeout: Duration) -> Result<Option<IpcMessage>> {
 pub fn await_install_result(timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut saw_success = false;
+    let mut saw_idle = false;
+    let mut last_current = None;
+    let mut last_result = None;
+    let mut poll_timeout = STATUS_POLL_INTERVAL;
 
     loop {
         let now = Instant::now();
@@ -132,11 +137,13 @@ pub fn await_install_result(timeout: Duration) -> Result<()> {
             return Err(Error::Timeout);
         }
 
-        let poll_timeout = deadline.saturating_duration_since(now).min(STATUS_POLL_INTERVAL);
-
         let msg = match get_status_timeout(poll_timeout) {
             Ok(Some(msg)) => msg,
-            Ok(None) | Err(Error::Closed) => {
+            Ok(None) => {
+                thread::sleep(STATUS_POLL_INTERVAL);
+                continue;
+            }
+            Err(Error::Closed) => {
                 thread::sleep(STATUS_POLL_INTERVAL);
                 continue;
             }
@@ -149,38 +156,33 @@ pub fn await_install_result(timeout: Duration) -> Result<()> {
         };
 
         let current = RecoveryStatus::try_from(current_raw).ok();
-        let last_result = RecoveryStatus::try_from(last_result_raw).ok();
+        let last_result_now = RecoveryStatus::try_from(last_result_raw).ok();
 
-        match current {
-            Some(RecoveryStatus::Success) => {
-                saw_success = true;
-                continue;
-            }
-            Some(RecoveryStatus::Failure) => return Err(Error::InstallFailed),
-            _ => {}
+        if current != last_current || last_result_now != last_result {
+            poll_timeout = STATUS_POLL_INTERVAL;
+            last_current = current;
+            last_result = last_result_now;
+        } else {
+            poll_timeout = STATUS_UNCHANGED_POLL_INTERVAL;
         }
 
-        if last_result == Some(RecoveryStatus::Failure) {
+        if current == Some(RecoveryStatus::Failure) {
             return Err(Error::InstallFailed);
         }
 
-        if saw_success && current == Some(RecoveryStatus::Idle) {
-            return Ok(());
-        }
-
-        let active = matches!(
-            current,
-            Some(RecoveryStatus::Start)
-                | Some(RecoveryStatus::Run)
-                | Some(RecoveryStatus::Download)
-                | Some(RecoveryStatus::Progress)
-                | Some(RecoveryStatus::Subprocess)
-        );
-
-        if !active {
-            if last_result == Some(RecoveryStatus::Success) {
+        match last_result_now {
+            Some(RecoveryStatus::Failure) => return Err(Error::InstallFailed),
+            Some(RecoveryStatus::Idle) if current == Some(RecoveryStatus::Run) => {
+                saw_idle = true;
+            }
+            Some(RecoveryStatus::Success) if current == Some(RecoveryStatus::Run) => {
                 saw_success = true;
             }
+            _ => {}
+        }
+
+        if saw_success && saw_idle {
+            return Ok(());
         }
 
     }
