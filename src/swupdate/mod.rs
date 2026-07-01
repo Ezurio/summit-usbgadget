@@ -33,7 +33,7 @@ pub use ipc::SwupdateParams;
 const REBOOT_DELAY: Duration = Duration::from_secs(5);
 static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
 
-async fn try_write_once<W>(writer: &mut W, buf: &[u8]) -> io::Result<usize>
+pub(super) async fn try_write_once<W>(writer: &mut W, buf: &[u8]) -> io::Result<usize>
 where
     W: AsyncWrite + Unpin,
 {

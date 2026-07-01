@@ -7,6 +7,7 @@
 //! terminal result on the control status channel.
 
 use std::io;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use rustix::io::Errno;
@@ -14,10 +15,9 @@ use swupdate_ipc::r#async as swu;
 use swupdate_ipc::Error as SwupdateError;
 use swupdate_ipc::{RunType, SourceType, SwupdateRequest};
 use tokio::io::AsyncWriteExt;
+use tokio::task::JoinHandle;
 
 use crate::sysinfo::BootRootfsInfo;
-
-use super::PendingWriter;
 
 fn normalize_ipc_error(err: SwupdateError, context: &str) -> io::Error {
     match err {
@@ -31,6 +31,12 @@ fn normalize_ipc_error(err: SwupdateError, context: &str) -> io::Error {
         other => io::Error::other(format!("SWUpdate {context} failed: {other}")),
     }
 }
+
+fn normalize_send_io_error(err: io::Error) -> io::Error {
+    normalize_ipc_error(SwupdateError::from(err), "send")
+}
+
+const MAX_QUEUED_BLOCKS: usize = 100;
 
 /// Parameters for an SWUpdate-backed download.
 #[derive(Debug, Clone)]
@@ -65,11 +71,57 @@ impl Default for SwupdateParams {
 
 /// Active SWUpdate IPC transport.
 pub(super) struct IpcSink {
-    conn: PendingWriter<swu::InstallConn>,
+    conn: Option<swu::InstallConn>,
+    writer_task: Option<JoinHandle<io::Result<swu::InstallConn>>>,
+    queued_blocks: VecDeque<Vec<u8>>,
     params: SwupdateParams,
 }
 
 impl IpcSink {
+    fn start_background_write(&mut self, pending: Vec<u8>) -> io::Result<()> {
+        let mut conn = self
+            .conn
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "SWUpdate install stream closed"))?;
+        self.writer_task = Some(tokio::spawn(async move {
+            conn.write_all(&pending).await.map_err(normalize_send_io_error)?;
+            Ok(conn)
+        }));
+        Ok(())
+    }
+
+    async fn submit_block(&mut self, data: Vec<u8>) -> io::Result<()> {
+        let conn = self
+            .conn
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "SWUpdate install stream closed"))?;
+        match super::try_write_once(conn, &data).await {
+            Ok(n) if n == data.len() => Ok(()),
+            Ok(n) => self.start_background_write(data[n..].to_vec()),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => self.start_background_write(data),
+            Err(err) => Err(normalize_send_io_error(err)),
+        }
+    }
+
+    async fn await_writer(&mut self) -> io::Result<()> {
+        let task = self.writer_task.take().expect("writer task must exist");
+        let conn = task.await.map_err(|err| io::Error::other(format!("SWUpdate send task failed: {err}")))??;
+        self.conn = Some(conn);
+
+        if let Some(block) = self.queued_blocks.pop_front() {
+            self.submit_block(block).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn poll_writer(&mut self) -> io::Result<()> {
+        if self.writer_task.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.await_writer().await?;
+        }
+        Ok(())
+    }
+
     /// Starts the install and opens a streaming connection for firmware blocks.
     pub(super) async fn begin(params: &SwupdateParams, info: &BootRootfsInfo) -> io::Result<Self> {
         let mut req = SwupdateRequest::prepare();
@@ -91,44 +143,79 @@ impl IpcSink {
             .map_err(|e| io::Error::other(format!("SWUpdate inst_start failed: {e}")))?;
         log::info!("SWUpdate install started; streaming firmware");
 
-        Ok(Self { conn: PendingWriter::new(conn), params: params.clone() })
+        Ok(Self {
+            conn: Some(conn),
+            writer_task: None,
+            queued_blocks: VecDeque::with_capacity(MAX_QUEUED_BLOCKS),
+            params: params.clone(),
+        })
     }
 
     pub(super) async fn write_block(&mut self, data: &[u8]) -> io::Result<()> {
-        self.conn
-            .write_block(data)
-            .await
-            .map_err(|err| io::Error::other(format!("SWUpdate send failed: {err}")))
+        let mut block = Some(data.to_vec());
+
+        while let Some(data) = block.take() {
+            self.poll_progress().await?;
+            if self.writer_task.is_some() {
+                if self.queued_blocks.len() < MAX_QUEUED_BLOCKS {
+                    self.queued_blocks.push_back(data);
+                    return Ok(());
+                }
+
+                self.await_writer().await?;
+                block = Some(data);
+                continue;
+            }
+
+            self.submit_block(data).await?;
+            return Ok(());
+        }
+
+        Ok(())
     }
 
-    pub(super) async fn finish(self, _timeout: Duration) -> io::Result<()> {
-        let Self { conn, params } = self;
-        let mut conn = conn;
-        conn.flush_pending()
-            .await
-            .map_err(|err| normalize_ipc_error(SwupdateError::from(err), "send"))?;
-        let conn = conn.into_inner();
+    pub(super) async fn finish(mut self, _timeout: Duration) -> io::Result<()> {
+        while self.writer_task.is_some() || !self.queued_blocks.is_empty() {
+            if self.writer_task.is_some() {
+                self.await_writer().await?;
+            } else if let Some(block) = self.queued_blocks.pop_front() {
+                self.submit_block(block).await?;
+            }
+        }
+
+        let conn = match self.conn.take() {
+            Some(conn) => conn,
+            None => {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "SWUpdate install stream closed"))
+            }
+        };
         conn.end()
             .await
             .map_err(|err| normalize_ipc_error(err, "end"))?;
-        swu::await_install_result(params.timeout)
+        swu::await_install_result(self.params.timeout)
             .await
             .map_err(|err| normalize_ipc_error(err, "wait"))?;
-        super::on_update_success(&params, false).await;
+        super::on_update_success(&self.params, false).await;
         Ok(())
     }
 
     pub(super) async fn abort(self) {
-        let Self { conn, .. } = self;
-        let mut stream = conn.into_inner().into_stream();
-        let _ = stream.shutdown().await;
+        let Self { conn, writer_task, .. } = self;
+        if let Some(task) = writer_task {
+            task.abort();
+            return;
+        }
+        if let Some(conn) = conn {
+            let mut stream = conn.into_stream();
+            let _ = stream.shutdown().await;
+        }
     }
 
     pub(super) fn is_busy(&self) -> bool {
-        self.conn.is_busy()
+        self.writer_task.is_some() || !self.queued_blocks.is_empty()
     }
 
     pub(super) async fn poll_progress(&mut self) -> io::Result<()> {
-        self.conn.poll_progress().await.map_err(|err| normalize_ipc_error(SwupdateError::from(err), "send"))
+        self.poll_writer().await
     }
 }

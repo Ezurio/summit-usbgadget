@@ -205,6 +205,7 @@ impl Dfu {
     /// Builds the `DFU_GETSTATUS` response and advances the synchronous parts
     /// of the state machine.
     fn get_status(&mut self) -> InReply {
+        let was_busy = self.state == State::DnBusy;
         self.state = match self.state {
             State::DnloadSync | State::DnBusy => {
                 if self.download_is_busy() {
@@ -221,7 +222,11 @@ impl Dfu {
 
         let response = GetStatus {
             status: self.status,
-            poll_timeout_ms: self.poll_timeout_ms,
+            poll_timeout_ms: if was_busy || self.state == State::DnBusy {
+                0
+            } else {
+                self.poll_timeout_ms
+            },
             state: self.state,
             string_index: 0,
         };
@@ -336,13 +341,13 @@ impl Dfu {
         self.download_crc = Hasher::new();
 
         match joined {
-            (sink, Ok(())) => {
-                self.sink = Some(sink);
+            (_sink, Ok(())) => {
+                self.sink = Some(ActiveDownload::new(self.download.clone()));
                 self.status = Status::Ok;
                 self.state = State::ManifestSync;
             }
-            (sink, Err(err)) => {
-                self.sink = Some(sink);
+            (_sink, Err(err)) => {
+                self.sink = Some(ActiveDownload::new(self.download.clone()));
                 log::error!("manifestation failed: {err}");
                 self.fault(Status::ErrVerify);
             }
@@ -467,6 +472,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_status_reports_zero_poll_timeout_while_busy() {
+        let mut dfu = Dfu::new(test_config());
+        dfu.state = State::DnBusy;
+        dfu.status = Status::Ok;
+
+        let status = dfu.get_status();
+
+        assert_eq!(status.as_slice()[1], 0);
+        assert_eq!(status.as_slice()[2], 0);
+        assert_eq!(status.as_slice()[3], 0);
+    }
+
+    #[tokio::test]
     async fn clrstatus_resets_stale_manifestation_state() {
         let mut dfu = Dfu::new(test_config());
         dfu.sink = None;
@@ -478,6 +496,14 @@ mod tests {
 
         assert!(dfu.sink.is_some());
         assert!(dfu.manifest_future.is_none());
+        assert_eq!(dfu.state, State::DfuIdle);
+        assert_eq!(dfu.status, Status::Ok);
+    }
+
+    #[test]
+    fn initial_state_is_dfu_idle() {
+        let dfu = Dfu::new(test_config());
+
         assert_eq!(dfu.state, State::DfuIdle);
         assert_eq!(dfu.status, Status::Ok);
     }

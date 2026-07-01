@@ -16,13 +16,18 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::future::{pending, Future};
 use std::io;
 use std::path::PathBuf;
 
 use futures_util::StreamExt;
+use tokio::task::JoinHandle;
 use tokio_udev::EventType;
 use usb_gadget::function::{self, Handle};
-use usb_gadget::{registered, remove_all, Class, Config, Gadget, Id, OsDescriptor, RegGadget, Strings, Udc};
+use usb_gadget::{
+    registered, remove_all, Class, Config, Gadget, Id, OsDescriptor, RegGadget, Speed, Strings,
+    Udc, UsbVersion,
+};
 
 use crate::config::{DfuFnConfig, FunctionConfig, GadgetConfig, MsdConfig, NetConfig, SerialConfig};
 #[cfg(feature = "dfu")]
@@ -96,6 +101,7 @@ fn apply_net_os_descriptors(descriptors: &[NetOsDescriptor]) -> Result<(), Box<d
 /// A bound composite gadget. Dropping it unbinds and removes the gadget.
 #[derive(Debug)]
 pub struct RunningGadget {
+    tasks: Vec<JoinHandle<()>>,
     _reg: RegGadget,
     #[cfg(feature = "dfu")]
     dfu: Option<DfuRuntime>,
@@ -104,6 +110,10 @@ pub struct RunningGadget {
 }
 
 impl RunningGadget {
+    fn push_task(&mut self, task: JoinHandle<()>) {
+        self.tasks.push(task);
+    }
+
     /// Takes the DFU runtime out of the gadget, if a DFU function is present.
     /// The gadget registration stays alive as long as `self` is held.
     #[cfg(feature = "dfu")]
@@ -115,6 +125,22 @@ impl RunningGadget {
     #[cfg(feature = "fbk")]
     pub fn take_fbk(&mut self) -> Option<FbkRuntime> {
         self.fbk.take()
+    }
+
+    async fn shutdown(mut self) {
+        let tasks = std::mem::take(&mut self.tasks);
+
+        for task in &tasks {
+            task.abort();
+        }
+
+        for task in tasks {
+            match task.await {
+                Ok(()) => {}
+                Err(err) if err.is_cancelled() => {}
+                Err(err) => log::warn!("FunctionFS task ended with error during shutdown: {err}"),
+            }
+        }
     }
 }
 
@@ -165,6 +191,20 @@ fn build_on_udc_once(cfg: &GadgetConfig, udc: &Udc) -> Result<RunningGadget, Box
     let gadget_name = udc.name().to_os_string();
     let mut gadget = Gadget::new(class, Id::new(device.vendor, device.product), strings);
     gadget.name = Some(gadget_name.to_string_lossy().into_owned());
+    match udc.max_speed() {
+        Ok(Speed::SuperSpeed) => {
+            gadget.usb_version = UsbVersion::V30;
+            gadget.max_speed = Some(Speed::SuperSpeed);
+        }
+        Ok(Speed::SuperSpeedPlus) => {
+            gadget.usb_version = UsbVersion::V31;
+            gadget.max_speed = Some(Speed::SuperSpeedPlus);
+        }
+        Ok(Speed::Unknown) | Err(_) => {}
+        Ok(speed) => {
+            gadget.max_speed = Some(speed);
+        }
+    }
     if let Some(os_descriptor) = &cfg.os_descriptor {
         // Base the gadget OS descriptor on the crate's Microsoft defaults,
         // overriding individual fields only when the configuration sets them.
@@ -246,6 +286,7 @@ fn build_on_udc_once(cfg: &GadgetConfig, udc: &Udc) -> Result<RunningGadget, Box
     #[cfg(feature = "dfu")]
     {
         Ok(RunningGadget {
+            tasks: Vec::new(),
             _reg: reg,
             dfu: outputs.dfu,
             #[cfg(feature = "fbk")]
@@ -256,6 +297,7 @@ fn build_on_udc_once(cfg: &GadgetConfig, udc: &Udc) -> Result<RunningGadget, Box
     #[cfg(not(feature = "dfu"))]
     {
         Ok(RunningGadget {
+            tasks: Vec::new(),
             _reg: reg,
             #[cfg(feature = "fbk")]
             fbk: outputs.fbk,
@@ -472,6 +514,15 @@ fn build_dfu(
 /// current and future — servicing relevant `udc` udev events until the stream
 /// ends.
 pub async fn serve(config: GadgetConfig) -> Result<(), Box<dyn Error>> {
+    serve_until(config, pending()).await
+}
+
+/// Like [`serve`], but stops when `shutdown` resolves and tears down spawned
+/// FunctionFS tasks before dropping gadget registrations.
+pub async fn serve_until<F>(config: GadgetConfig, shutdown: F) -> Result<(), Box<dyn Error>>
+where
+    F: Future<Output = ()>,
+{
     reset()?;
 
     let selection = Selection::from_config(&config.udc);
@@ -480,6 +531,7 @@ pub async fn serve(config: GadgetConfig) -> Result<(), Box<dyn Error>> {
     // Create the udev monitor before enumerating existing controllers so no
     // hotplug event is missed in the gap between the two.
     let mut monitor = udc::monitor()?;
+    tokio::pin!(shutdown);
 
     let mut gadgets: Vec<RunningGadget> = Vec::new();
     let mut bound: HashSet<OsString> = HashSet::new();
@@ -492,21 +544,41 @@ pub async fn serve(config: GadgetConfig) -> Result<(), Box<dyn Error>> {
         log::info!("listening for USB device controllers via udev...");
     }
 
-    while let Some(event) = monitor.next().await {
-        let event = match event {
-            Ok(event) => event,
-            Err(err) => {
-                log::warn!("udev monitor error: {err}");
-                continue;
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                log::info!("shutdown requested, stopping USB gadgets");
+                break;
             }
-        };
-        let Some(name) = udc_name_from_event(&event) else {
-            continue;
-        };
-        bind_one(&config, &selection, &mut bound, &mut gadgets, name);
+            maybe_event = monitor.next() => {
+                let Some(event) = maybe_event else {
+                    break;
+                };
+
+                let event = match event {
+                    Ok(event) => event,
+                    Err(err) => {
+                        log::warn!("udev monitor error: {err}");
+                        continue;
+                    }
+                };
+                let Some(name) = udc_name_from_event(&event) else {
+                    continue;
+                };
+                bind_one(&config, &selection, &mut bound, &mut gadgets, name);
+            }
+        }
     }
 
+    shutdown_all(gadgets).await;
+
     Ok(())
+}
+
+async fn shutdown_all(gadgets: Vec<RunningGadget>) {
+    for gadget in gadgets {
+        gadget.shutdown().await;
+    }
 }
 
 fn bind_existing(
@@ -544,20 +616,18 @@ fn bind_one(
     };
 
     match build_on_udc(config, &udc) {
-        Ok(running) => {
-            #[cfg(feature = "dfu")]
-            let mut running = running;
+        Ok(mut running) => {
 
             #[cfg(feature = "dfu")]
             if let Some(dfu_runtime) = running.take_dfu() {
                 let udc_name = name.to_string_lossy().into_owned();
-                drop(tokio::spawn(crate::dfu::serve(udc_name, dfu_runtime)));
+                running.push_task(tokio::spawn(crate::dfu::serve(udc_name, dfu_runtime)));
             }
 
             #[cfg(feature = "fbk")]
             if let Some(fbk_runtime) = running.take_fbk() {
                 let udc_name = name.to_string_lossy().into_owned();
-                drop(tokio::spawn(crate::fbk::serve(udc_name, fbk_runtime)));
+                running.push_task(tokio::spawn(crate::fbk::serve(udc_name, fbk_runtime)));
             }
             gadgets.push(running);
             let inserted = bound.insert(name);

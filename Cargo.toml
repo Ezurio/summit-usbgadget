@@ -39,7 +39,7 @@ simple_logger = { version = "5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 swupdate-ipc = { path = "crates/swupdate-ipc", features = ["async"], optional = true }
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "signal"] }
 tokio-udev = "0.10"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 bytes = "1"

@@ -40,7 +40,7 @@ impl DfuConfig {
             can_download: true,
             can_upload: self.upload.is_some(),
             manifest_tolerant: true,
-            will_detach: true,
+            will_detach: false,
             detach_timeout_ms: 1000,
             transfer_size: self.transfer_size,
             dfu_version: (1, 1),

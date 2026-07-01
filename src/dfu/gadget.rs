@@ -32,7 +32,7 @@ pub fn build(cfg: &DfuFnConfig, serial: &str) -> (Handle, DfuRuntime) {
     let config = cfg.to_config(serial);
     let (custom, handle) = Custom::builder()
         .with_interface(
-            Interface::new(Class::DFU_RUNTIME, "swupdate").with_custom_desc(config.descriptor().into()),
+            Interface::new(Class::DFU_MODE, "swupdate").with_custom_desc(config.descriptor().into()),
         )
         .build();
     (handle, DfuRuntime { custom, config })

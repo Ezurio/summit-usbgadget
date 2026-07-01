@@ -46,7 +46,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    gadget::serve(config).await
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
+        gadget::serve_until(config, async {
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    log::info!("received SIGTERM, shutting down gadget service");
+                }
+                _ = sigint.recv() => {
+                    log::info!("received SIGINT, shutting down gadget service");
+                }
+            }
+        }).await
+    }
+
+    #[cfg(not(unix))]
+    {
+        gadget::serve(config).await
+    }
 }
 
 /// Determines the configuration file path from the command line or environment.
