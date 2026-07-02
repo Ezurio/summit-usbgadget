@@ -13,7 +13,11 @@ use std::time::Duration;
 
 use tokio::process::{Child, ChildStdin, Command};
 
-use super::PendingWriter;
+use bytes::BytesMut;
+
+use super::queued_writer::QueuedWriter;
+
+const MAX_QUEUED_BYTES: usize = 512 * 1024;
 
 fn normalize_pipe_error(err: io::Error) -> io::Error {
     if err.kind() == io::ErrorKind::BrokenPipe {
@@ -23,15 +27,13 @@ fn normalize_pipe_error(err: io::Error) -> io::Error {
     }
 }
 
-/// Active `fw_update` pipe transport: stdin handle plus the child process.
 pub(super) struct PipeSink {
-    stdin: PendingWriter<ChildStdin>,
+    stdin: QueuedWriter<ChildStdin>,
     child: Child,
 }
 
 impl PipeSink {
     pub(super) async fn begin() -> io::Result<Self> {
-        // fw_update rejects any method other than "complete" in these environments.
         let image_mode = "complete";
         log::info!("pipe boot: streaming firmware through fw_update -m {image_mode}");
         let mut child = Command::new("fw_update")
@@ -46,16 +48,19 @@ impl PipeSink {
             .stdin
             .take()
             .ok_or_else(|| io::Error::other("failed to open fw_update stdin"))?;
-        Ok(Self { stdin: PendingWriter::new(stdin), child })
+        Ok(Self { stdin: QueuedWriter::new(stdin, MAX_QUEUED_BYTES), child })
     }
 
-    pub(super) async fn write_block(&mut self, data: &[u8]) -> io::Result<()> {
-        self.stdin.write_block(data).await.map_err(normalize_pipe_error)
+    pub(super) async fn write_block(&mut self, data: BytesMut) -> io::Result<usize> {
+        self.stdin.write_block(data, normalize_pipe_error).await
     }
 
     pub(super) async fn finish(mut self, timeout: Duration) -> io::Result<()> {
-        self.stdin.flush_pending().await.map_err(normalize_pipe_error)?;
-        drop(self.stdin.into_inner()); // EOF → fw_update
+        self.stdin.log_diagnostics("fw_update finish requested");
+        while !self.stdin.flush_queued(normalize_pipe_error).await? {
+            self.stdin.wait_pending().await.map_err(normalize_pipe_error)?;
+        }
+        drop(self.stdin.into_inner());
         match tokio::time::timeout(timeout, self.child.wait()).await {
             Ok(Ok(s)) if s.success() => {
                 log::info!("fw_update completed successfully");
@@ -71,6 +76,7 @@ impl PipeSink {
     }
 
     pub(super) async fn abort(mut self) {
+        self.stdin.log_diagnostics("fw_update abort requested");
         drop(self.stdin.into_inner());
         let _ = self.child.kill().await;
     }
@@ -79,7 +85,15 @@ impl PipeSink {
         self.stdin.is_busy()
     }
 
+    pub(super) fn should_throttle(&self, reserve_bytes: usize) -> bool {
+        self.stdin.should_throttle(reserve_bytes)
+    }
+
     pub(super) async fn poll_progress(&mut self) -> io::Result<()> {
-        self.stdin.poll_progress().await.map_err(normalize_pipe_error)
+        self.stdin.poll_progress(normalize_pipe_error).await
+    }
+
+    pub(super) async fn wait_writable(&mut self) -> io::Result<()> {
+        self.stdin.wait_writable(normalize_pipe_error).await
     }
 }

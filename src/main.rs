@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init()
         .unwrap();
 
-    #[cfg(feature = "dfu")]
+    #[cfg(any(feature = "dfu", feature = "fbk"))]
     summit_usbgadget::sysinfo::init().await;
 
     let config_path = config_path_from_args();

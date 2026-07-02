@@ -392,7 +392,7 @@ fn build_function(
         FunctionConfig::Net(c) => build_net(c, &mut outputs.net_os).map(Some),
         FunctionConfig::Msd(c) => build_msd(c).map(Some),
         FunctionConfig::Dfu(c) => build_dfu(c, serial, outputs),
-        FunctionConfig::Fbk(c) => build_fbk(c, outputs),
+        FunctionConfig::Fbk(c) => build_fbk(c, serial, outputs),
     }
 }
 
@@ -476,25 +476,25 @@ fn build_dfu(
     if outputs.dfu.is_some() {
         return Err("configuration declares more than one DFU function".into());
     }
-    let (handle, runtime) = crate::dfu::gadget::build(c, serial);
+    let (handle, runtime) = crate::dfu::gadget::build(c, serial)?;
     outputs.dfu = Some(runtime);
     Ok(Some(handle))
 }
 
 /// Builds the FBK custom function and captures its runtime in `outputs`.
 #[cfg(feature = "fbk")]
-fn build_fbk(c: &DfuFnConfig, outputs: &mut FunctionOutputs) -> Result<Option<Handle>, Box<dyn Error>> {
+fn build_fbk(c: &DfuFnConfig, serial: &str, outputs: &mut FunctionOutputs) -> Result<Option<Handle>, Box<dyn Error>> {
     if outputs.fbk.is_some() {
         return Err("configuration declares more than one FBK function".into());
     }
-    let (handle, runtime) = crate::fbk::build(c);
+    let (handle, runtime) = crate::fbk::build(c, serial)?;
     outputs.fbk = Some(runtime);
     Ok(Some(handle))
 }
 
 /// Skips an FBK function in builds compiled without the `fbk` feature.
 #[cfg(not(feature = "fbk"))]
-fn build_fbk(_c: &DfuFnConfig, _outputs: &mut FunctionOutputs) -> Result<Option<Handle>, Box<dyn Error>> {
+fn build_fbk(_c: &DfuFnConfig, _serial: &str, _outputs: &mut FunctionOutputs) -> Result<Option<Handle>, Box<dyn Error>> {
     log::warn!("ignoring FBK function because this build was compiled without the fbk feature");
     Ok(None)
 }

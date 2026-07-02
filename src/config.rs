@@ -43,8 +43,6 @@ use std::fmt;
 use std::path::Path;
 
 #[cfg(any(feature = "dfu", feature = "fbk"))]
-use std::path::PathBuf;
-#[cfg(any(feature = "dfu", feature = "fbk"))]
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -52,9 +50,7 @@ use serde::Deserialize;
 #[cfg(feature = "dfu")]
 use bytes::Bytes;
 #[cfg(feature = "dfu")]
-use crate::dfu::{DfuConfig, DownloadTarget, UploadSource};
-#[cfg(all(not(feature = "dfu"), feature = "fbk"))]
-use crate::stream_download::DownloadTarget;
+use crate::dfu::{DfuConfig, UploadSource};
 #[cfg(any(feature = "dfu", feature = "fbk"))]
 use crate::swupdate::SwupdateParams;
 
@@ -229,9 +225,9 @@ pub struct MsdConfig {
 /// DFU function configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DfuFnConfig {
-    /// `"swupdate"` (default) or `"file:/path"`.
+    /// `"swupdate"` (default). Any other value is rejected.
     pub download: Option<String>,
-    /// What `DFU_UPLOAD` serves: a file path, or `"sysinfo"` to report the
+    /// What `DFU_UPLOAD` serves: `"sysinfo"` to report the
     /// device's system information (model, serial, SoC, memory, HW part number).
     pub upload: Option<String>,
     /// Maximum bytes per DFU control-write transaction.
@@ -251,28 +247,18 @@ pub struct DfuFnConfig {
 }
 
 impl DfuFnConfig {
-    /// Converts the configured download target into the shared streamed-install
-    /// destination used by DFU and FBK.
-    #[cfg(any(feature = "dfu", feature = "fbk"))]
-    pub(crate) fn to_download_target(&self) -> DownloadTarget {
-        match self.download.as_deref() {
-            None | Some("swupdate") => DownloadTarget::Swupdate(self.to_swupdate_params()),
-            Some(other) => {
-                let path = other.strip_prefix("file:").unwrap_or(other);
-                DownloadTarget::File(PathBuf::from(path))
-            }
-        }
-    }
-
     /// Converts SWUpdate tuning into sink parameters.
     #[cfg(any(feature = "dfu", feature = "fbk"))]
-    pub(crate) fn to_swupdate_params(&self) -> SwupdateParams {
-        SwupdateParams {
-            software_set: self.software_set.clone(),
-            image_mode: self.image_mode.clone(),
-            dry_run: self.dry_run.unwrap_or(false),
-            disable_store_swu: self.disable_store_swu.unwrap_or(true),
-            timeout: Duration::from_secs(self.timeout_secs.unwrap_or(120)),
+    pub(crate) fn to_swupdate_params(&self) -> Result<SwupdateParams, ConfigError> {
+        match self.download.as_deref() {
+            None | Some("swupdate") => Ok(SwupdateParams {
+                software_set: self.software_set.clone(),
+                image_mode: self.image_mode.clone(),
+                dry_run: self.dry_run.unwrap_or(false),
+                disable_store_swu: self.disable_store_swu.unwrap_or(true),
+                timeout: Duration::from_secs(self.timeout_secs.unwrap_or(120)),
+            }),
+            Some(other) => Err(ConfigError::UnsupportedDownloadTarget(other.to_string())),
         }
     }
 }
@@ -283,7 +269,7 @@ impl DfuFnConfig {
     ///
     /// `serial` is the resolved gadget serial number, embedded in the system
     /// information report when `upload = "sysinfo"`.
-    pub fn to_config(&self, serial: &str) -> DfuConfig {
+    pub fn to_config(&self, serial: &str) -> Result<DfuConfig, ConfigError> {
         let transfer_size = self.transfer_size.unwrap_or(4096);
         let poll_timeout_ms = self.poll_timeout_ms.unwrap_or(10);
 
@@ -293,15 +279,12 @@ impl DfuFnConfig {
                 let info = crate::sysinfo::SystemInfo::collect(Some(serial.to_string()));
                 Some(UploadSource::Data(Bytes::from(info.to_bytes())))
             }
-            Some(other) => {
-                let path = other.strip_prefix("file:").unwrap_or(other);
-                Some(UploadSource::File(PathBuf::from(path)))
-            }
+            Some(other) => return Err(ConfigError::UnsupportedUploadTarget(other.to_string())),
         };
 
-        let download = self.to_download_target();
+        let download = self.to_swupdate_params()?;
 
-        DfuConfig { download, upload, transfer_size, poll_timeout_ms }
+        Ok(DfuConfig { download, upload, transfer_size, poll_timeout_ms })
     }
 }
 
@@ -312,6 +295,10 @@ pub enum ConfigError {
     Io(std::io::Error),
     /// The TOML could not be parsed.
     Toml(toml::de::Error),
+    /// The configured download target is unsupported and insecure.
+    UnsupportedDownloadTarget(String),
+    /// The configured upload target is unsupported and insecure.
+    UnsupportedUploadTarget(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -319,6 +306,12 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::Io(e) => write!(f, "cannot read configuration: {e}"),
             ConfigError::Toml(e) => write!(f, "invalid configuration: {e}"),
+            ConfigError::UnsupportedDownloadTarget(target) => {
+                write!(f, "unsupported insecure download target {target:?}; only \"swupdate\" is allowed")
+            }
+            ConfigError::UnsupportedUploadTarget(target) => {
+                write!(f, "unsupported insecure upload target {target:?}; only \"sysinfo\" is allowed")
+            }
         }
     }
 }

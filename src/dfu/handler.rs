@@ -5,25 +5,23 @@
 
 use std::future::Future;
 use std::future::poll_fn;
-use std::io::{self, SeekFrom};
+use std::io;
 use std::pin::Pin;
 use std::task::Poll;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use crc32fast::Hasher;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use usb_gadget::function::custom::CtrlReq;
 
-use crate::stream_download::{ActiveDownload, DownloadTarget};
+use crate::swupdate::{SwupdateParams, SwupdateSink};
 
 use super::config::{DfuConfig, UploadSource};
 use super::protocol::{request, GetStatus, State, Status};
 
 const DFU_SUFFIX_LEN: usize = 16;
 
-type ManifestFuture = Pin<Box<dyn Future<Output = (ActiveDownload, io::Result<()>)> + Send>>;
+type ManifestFuture = Pin<Box<dyn Future<Output = (SwupdateSink, io::Result<()>)> + Send>>;
 
 /// Payload returned for a DFU device-to-host control request.
 #[derive(Debug, Clone)]
@@ -62,13 +60,11 @@ pub fn is_dfu_request(req: &CtrlReq) -> bool {
 pub struct Dfu {
     transfer_size: u16,
     poll_timeout_ms: u32,
-    download: DownloadTarget,
+    download: SwupdateParams,
     download_tail: Vec<u8>,
     download_crc: Hasher,
     upload: Option<UploadSource>,
-    upload_file: Option<File>,
-    upload_buf: Vec<u8>,
-    sink: Option<ActiveDownload>,
+    sink: Option<SwupdateSink>,
     manifest_future: Option<ManifestFuture>,
     state: State,
     status: Status,
@@ -78,7 +74,7 @@ impl Dfu {
     /// Creates a new DFU handler from the given configuration.
     pub fn new(config: DfuConfig) -> Self {
         let DfuConfig { download, upload, transfer_size, poll_timeout_ms } = config;
-        let sink = ActiveDownload::new(download.clone());
+        let sink = SwupdateSink::new(download.clone());
         Self {
             transfer_size,
             poll_timeout_ms,
@@ -86,8 +82,6 @@ impl Dfu {
             download_tail: Vec::with_capacity(DFU_SUFFIX_LEN),
             download_crc: Hasher::new(),
             upload,
-            upload_file: None,
-            upload_buf: Vec::new(),
             sink: Some(sink),
             manifest_future: None,
             state: State::DfuIdle,
@@ -149,13 +143,11 @@ impl Dfu {
                 sink.abort().await;
             }
         }
-        self.sink = Some(ActiveDownload::new(self.download.clone()));
+        self.sink = Some(SwupdateSink::new(self.download.clone()));
         self.status = Status::Ok;
         self.state = State::DfuIdle;
         self.download_tail.clear();
         self.download_crc = Hasher::new();
-        self.upload_file = None;
-        self.upload_buf.clear();
     }
 
     /// Handles a device-to-host DFU control request, returning the response
@@ -192,7 +184,7 @@ impl Dfu {
         if has_valid_dfu_suffix(&self.download_crc, &tail) {
             log::info!("ignoring trailing DFU suffix before manifestation");
         } else if !tail.is_empty() {
-            sink.write_block(&tail).await?;
+            sink.write_block(BytesMut::from(&tail[..])).await?;
         }
 
         self.manifest_future = Some(Box::pin(async move {
@@ -241,44 +233,21 @@ impl Dfu {
         let transfer_size = self.transfer_size as usize;
         let offset = req.value as u64 * self.transfer_size as u64;
 
-        // Determine the source kind without holding a borrow across awaits.
-        let path = match &self.upload {
+        let buf = match &self.upload {
             None => {
                 return Err(io::Error::new(io::ErrorKind::NotFound, "no DFU upload source configured"))
             }
-            Some(UploadSource::Data(_)) => None,
-            Some(UploadSource::File(path)) => Some(path.clone()),
-        };
-
-        let buf = match path {
-            None => {
+            Some(UploadSource::Data(data)) => {
                 // In-memory blob (e.g. system information).
-                let data = match &self.upload {
-                    Some(UploadSource::Data(data)) => data,
-                    _ => unreachable!("upload source is data"),
-                };
                 let start = (offset as usize).min(data.len());
                 let end = (start + transfer_size).min(data.len());
                 data.slice(start..end)
-            }
-            Some(path) => {
-                if self.upload_file.is_none() {
-                    self.upload_file = Some(File::open(&path).await?);
-                }
-                let file = self.upload_file.as_mut().expect("upload file just set");
-                let _ = file.seek(SeekFrom::Start(offset)).await?;
-                self.upload_buf.resize(transfer_size, 0);
-                let n = read_full(file, &mut self.upload_buf).await?;
-                self.upload_buf.truncate(n);
-                Bytes::copy_from_slice(&self.upload_buf)
             }
         };
 
         if buf.len() < transfer_size {
             // A short (or empty) block terminates the upload.
             self.state = State::DfuIdle;
-            self.upload_file = None;
-            self.upload_buf.clear();
         } else {
             self.state = State::UploadIdle;
         }
@@ -293,8 +262,16 @@ impl Dfu {
         self.state = State::Error;
     }
 
+    // DFU downloads advance one control-transfer payload at a time, so the
+    // USB-side backpressure reserve is exactly one advertised DNLOAD packet.
+    fn download_reserve_bytes(&self) -> usize {
+        self.transfer_size as usize
+    }
+
     fn download_is_busy(&self) -> bool {
-        self.sink.as_ref().is_some_and(ActiveDownload::is_busy)
+        self.sink
+            .as_ref()
+            .is_some_and(|sink| sink.is_busy() || sink.should_throttle(self.download_reserve_bytes()))
     }
 
     async fn write_dnload_block(&mut self, data: &[u8]) -> io::Result<()> {
@@ -312,7 +289,7 @@ impl Dfu {
             .as_mut()
             .ok_or_else(|| io::Error::other("manifestation in progress"))?;
         self.download_crc.update(&prefix);
-        sink.write_block(&prefix).await
+        sink.write_block(BytesMut::from(&prefix[..])).await
     }
 
     async fn poll_download_progress(&mut self) -> io::Result<()> {
@@ -342,32 +319,18 @@ impl Dfu {
 
         match joined {
             (_sink, Ok(())) => {
-                self.sink = Some(ActiveDownload::new(self.download.clone()));
+                self.sink = Some(SwupdateSink::new(self.download.clone()));
                 self.status = Status::Ok;
                 self.state = State::ManifestSync;
             }
             (_sink, Err(err)) => {
-                self.sink = Some(ActiveDownload::new(self.download.clone()));
+                self.sink = Some(SwupdateSink::new(self.download.clone()));
                 log::error!("manifestation failed: {err}");
                 self.fault(Status::ErrVerify);
             }
         }
     }
 
-}
-
-/// Reads into `buf` until it is full or end-of-file is reached, returning the
-/// number of bytes read.
-async fn read_full(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
-    let mut total = 0;
-    while total < buf.len() {
-        let n = file.read(&mut buf[total..]).await?;
-        if n == 0 {
-            break;
-        }
-        total += n;
-    }
-    Ok(total)
 }
 
 fn take_suffix_prefix(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
@@ -401,13 +364,13 @@ mod tests {
 
     use crate::dfu::config::DfuConfig;
     use crate::dfu::protocol::{request, State, Status};
-    use crate::stream_download::DownloadTarget;
+    use crate::swupdate::SwupdateParams;
 
     use super::{DFU_SUFFIX_LEN, Dfu, has_valid_dfu_suffix, take_suffix_prefix};
 
     fn test_config() -> DfuConfig {
         DfuConfig {
-            download: DownloadTarget::File(std::env::temp_dir().join("summit-usbgadget-dfu-test.bin")),
+            download: SwupdateParams::default(),
             upload: None,
             transfer_size: 4096,
             poll_timeout_ms: 10,

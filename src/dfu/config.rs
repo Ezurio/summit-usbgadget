@@ -3,18 +3,14 @@
 //
 //! Runtime configuration for the DFU function.
 
-use std::path::PathBuf;
-
 use bytes::Bytes;
 use usb_gadget::function::custom::DfuDesc;
 
-use crate::stream_download::DownloadTarget;
+use crate::swupdate::SwupdateParams;
 
 /// Source served to the host in response to `DFU_UPLOAD`.
 #[derive(Debug, Clone)]
 pub enum UploadSource {
-    /// Serve the contents of a file (e.g. a firmware read-back).
-    File(PathBuf),
     /// Serve an in-memory blob (e.g. a system-information report).
     Data(Bytes),
 }
@@ -23,7 +19,7 @@ pub enum UploadSource {
 #[derive(Debug, Clone)]
 pub struct DfuConfig {
     /// Destination for received firmware.
-    pub(crate) download: DownloadTarget,
+    pub(crate) download: SwupdateParams,
     /// Optional source that firmware uploads are served from.
     pub upload: Option<UploadSource>,
     /// Maximum number of bytes transferred per control-write transaction.

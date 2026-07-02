@@ -183,6 +183,21 @@ sudo dfu-util -U readback.bin
 For FBK / UUU uploads, keep using the raw `.swu` bundle; the DFU suffix wrapper
 is only for the DFU transport.
 
+The FBK function also exposes a small fastboot-compatible subset used by host
+tools and recovery flows:
+
+- `getvar:<name>` for the built-in variables implemented by the daemon
+  (`version`, `max-download-size`, `max-fetch-size`, `product`, `serialno`,
+  `is-userspace`, `all`, plus slot / partition queries for `update`, `swu`,
+  `sysinfo`, and `sysinfo.json`)
+- `fetch:sysinfo` and `fetch:sysinfo.json`
+- `download:%08x` (and the legacy `download:`, `donwload:` spellings accepted
+  by existing host flows)
+- `flash:update` and `flash:swu`
+
+The legacy FBK control commands `WOpen:<...>` and `Close` are also accepted for
+UUU-style upload flows.
+
 ### Example i.MX8MM UUU recovery update
 
 An example host-side `uuu` script is provided in `imx8mm-update.uuu`. It is an

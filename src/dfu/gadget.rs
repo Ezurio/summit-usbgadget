@@ -12,7 +12,7 @@ use usb_gadget::function::custom::{Custom, Event, Interface};
 use usb_gadget::function::Handle;
 use usb_gadget::Class;
 
-use crate::config::DfuFnConfig;
+use crate::config::{ConfigError, DfuFnConfig};
 use crate::functionfs::{EventHandler, is_closed_transport_error};
 
 use super::{Dfu, DfuConfig};
@@ -28,14 +28,14 @@ pub struct DfuRuntime {
 
 /// Builds the DFU custom function, returning its function handle and the runtime
 /// used to service control requests once the gadget is bound.
-pub fn build(cfg: &DfuFnConfig, serial: &str) -> (Handle, DfuRuntime) {
-    let config = cfg.to_config(serial);
+pub fn build(cfg: &DfuFnConfig, serial: &str) -> Result<(Handle, DfuRuntime), ConfigError> {
+    let config = cfg.to_config(serial)?;
     let (custom, handle) = Custom::builder()
         .with_interface(
             Interface::new(Class::DFU_MODE, "swupdate").with_custom_desc(config.descriptor().into()),
         )
         .build();
-    (handle, DfuRuntime { custom, config })
+    Ok((handle, DfuRuntime { custom, config }))
 }
 
 /// Services the DFU endpoint-zero event loop for one gadget until its task is

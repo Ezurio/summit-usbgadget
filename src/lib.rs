@@ -8,7 +8,7 @@
 //! * [`config`] — parses the runtime gadget configuration file that selects
 //!   which functions make up the composite gadget.
 //! * [`dfu`] — when the `dfu` feature is enabled, the USB DFU 1.1 protocol
-//!   state machine and the firmware sinks (file or SWUpdate IPC).
+//!   state machine and the SWUpdate firmware sink.
 //! * [`gadget`] — builds and binds the composite gadget described by a
 //!   [`config::GadgetConfig`].
 //!
@@ -22,8 +22,6 @@ pub mod dfu;
 pub mod fbk;
 #[cfg(any(feature = "dfu", feature = "fbk"))]
 mod functionfs;
-#[cfg(any(feature = "dfu", feature = "fbk"))]
-mod stream_download;
 #[cfg(any(feature = "dfu", feature = "fbk"))]
 pub mod swupdate;
 pub mod gadget;

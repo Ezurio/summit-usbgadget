@@ -13,132 +13,15 @@
 
 mod ipc;
 mod pipe;
+mod queued_writer;
+mod restart;
 
 use std::io;
-use std::future::poll_fn;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::Poll;
-use std::time::Duration;
-
-use rustix::fs;
-use rustix::system::{self, RebootCommand};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::time::sleep;
+use bytes::BytesMut;
 use ipc::IpcSink;
 use pipe::PipeSink;
 
 pub use ipc::SwupdateParams;
-
-const REBOOT_DELAY: Duration = Duration::from_secs(5);
-static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
-
-pub(super) async fn try_write_once<W>(writer: &mut W, buf: &[u8]) -> io::Result<usize>
-where
-    W: AsyncWrite + Unpin,
-{
-    poll_fn(|cx| match Pin::new(&mut *writer).poll_write(cx, buf) {
-        Poll::Ready(result) => Poll::Ready(result),
-        Poll::Pending => Poll::Ready(Err(io::Error::new(io::ErrorKind::WouldBlock, "writer not ready"))),
-    })
-    .await
-}
-
-pub(super) struct PendingWriter<W> {
-    writer: W,
-    pending: Vec<u8>,
-    pending_offset: usize,
-}
-
-impl<W> PendingWriter<W> {
-    pub(super) fn new(writer: W) -> Self {
-        Self { writer, pending: Vec::new(), pending_offset: 0 }
-    }
-
-    pub(super) fn is_busy(&self) -> bool {
-        self.pending_offset < self.pending.len()
-    }
-
-    pub(super) fn into_inner(self) -> W {
-        self.writer
-    }
-}
-
-impl<W> PendingWriter<W>
-where
-    W: AsyncWrite + Unpin,
-{
-    pub(super) async fn write_block(&mut self, data: &[u8]) -> io::Result<()> {
-        self.poll_progress().await?;
-        if self.is_busy() {
-            return Ok(());
-        }
-
-        match try_write_once(&mut self.writer, data).await {
-            Ok(n) if n == data.len() => Ok(()),
-            Ok(n) => {
-                self.pending.extend_from_slice(&data[n..]);
-                self.pending_offset = 0;
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                self.pending.extend_from_slice(data);
-                self.pending_offset = 0;
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    pub(super) async fn poll_progress(&mut self) -> io::Result<()> {
-        while self.is_busy() {
-            match try_write_once(&mut self.writer, &self.pending[self.pending_offset..]).await {
-                Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "writer closed")),
-                Ok(n) => {
-                    self.pending_offset += n;
-                }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                Err(err) => return Err(err),
-            }
-        }
-
-        self.pending.clear();
-        self.pending_offset = 0;
-        Ok(())
-    }
-
-    pub(super) async fn flush_pending(&mut self) -> io::Result<()> {
-        self.poll_progress().await?;
-        if self.is_busy() {
-            self.writer.write_all(&self.pending[self.pending_offset..]).await?;
-            self.pending.clear();
-            self.pending_offset = 0;
-        }
-        self.writer.flush().await
-    }
-}
-
-fn is_complete_update(params: &SwupdateParams) -> bool {
-    matches!(params.image_mode.as_deref(), Some("complete"))
-}
-
-pub(super) async fn on_update_success(params: &SwupdateParams, force_complete: bool) {
-    if force_complete || is_complete_update(params) {
-        log::info!("SWUpdate complete update succeeded; skipping local restart");
-        return;
-    }
-
-    RESTART_PENDING.store(true, Ordering::Relaxed);
-    log::info!("SWUpdate update succeeded; scheduling local restart in {REBOOT_DELAY:?}");
-    drop(tokio::spawn(async {
-        sleep(REBOOT_DELAY).await;
-        log::info!("SWUpdate reboot delay elapsed; syncing filesystems before local restart");
-        fs::sync();
-        if let Err(err) = system::reboot(RebootCommand::Restart) {
-            log::error!("local reboot failed: {err}");
-        }
-    }));
-}
 
 /// Active transport during a download, selected by the boot context.
 enum Transport {
@@ -170,12 +53,24 @@ impl SwupdateSink {
         Self { params, transport: None }
     }
 
+    pub(crate) fn is_active(&self) -> bool {
+        self.transport.is_some()
+    }
+
     pub(crate) async fn begin(&mut self) -> io::Result<()> {
-        if RESTART_PENDING.load(Ordering::Relaxed) {
-            return Err(io::Error::other("restart pending after successful SWUpdate; rejecting new update"));
+        if self.transport.is_some() {
+            return Ok(());
         }
 
+        restart::reject_if_restart_pending()?;
+
         let info = crate::sysinfo::boot_info();
+        log::warn!(
+            "SwupdateSink::begin pipe_mode={} image_mode={:?} software_set={:?}",
+            info.use_pipe_mode(),
+            self.params.image_mode,
+            self.params.software_set
+        );
         let transport = if info.use_pipe_mode() {
             Transport::Pipe(PipeSink::begin().await?)
         } else {
@@ -185,7 +80,17 @@ impl SwupdateSink {
         Ok(())
     }
 
-    pub(crate) async fn write_block(&mut self, data: &[u8]) -> io::Result<()> {
+    pub(crate) async fn write_block(&mut self, data: BytesMut) -> io::Result<()> {
+        self.begin().await?;
+
+        match self.transport.as_mut() {
+            Some(Transport::Ipc(sink)) => sink.write_block(data).await.map(|_| ()),
+            Some(Transport::Pipe(sink)) => sink.write_block(data).await.map(|_| ()),
+            None => Err(io::Error::new(io::ErrorKind::NotConnected, "download not started")),
+        }
+    }
+
+    pub(crate) async fn write_block_if_active(&mut self, data: BytesMut) -> io::Result<usize> {
         match self.transport.as_mut() {
             Some(Transport::Ipc(sink)) => sink.write_block(data).await,
             Some(Transport::Pipe(sink)) => sink.write_block(data).await,
@@ -198,7 +103,7 @@ impl SwupdateSink {
             Some(Transport::Ipc(sink)) => sink.finish(self.params.timeout).await,
             Some(Transport::Pipe(sink)) => {
                 sink.finish(self.params.timeout).await?;
-                on_update_success(&self.params, true).await;
+                restart::on_update_success(&self.params, true).await;
                 Ok(())
             }
             None => Ok(()),
@@ -221,10 +126,26 @@ impl SwupdateSink {
         }
     }
 
+    pub(crate) fn should_throttle(&self, reserve_bytes: usize) -> bool {
+        match self.transport.as_ref() {
+            Some(Transport::Ipc(sink)) => sink.should_throttle(reserve_bytes),
+            Some(Transport::Pipe(sink)) => sink.should_throttle(reserve_bytes),
+            None => false,
+        }
+    }
+
     pub(crate) async fn poll_progress(&mut self) -> io::Result<()> {
         match self.transport.as_mut() {
             Some(Transport::Ipc(sink)) => sink.poll_progress().await,
             Some(Transport::Pipe(sink)) => sink.poll_progress().await,
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) async fn wait_writable(&mut self) -> io::Result<()> {
+        match self.transport.as_mut() {
+            Some(Transport::Ipc(sink)) => sink.wait_writable().await,
+            Some(Transport::Pipe(sink)) => sink.wait_writable().await,
             None => Ok(()),
         }
     }
