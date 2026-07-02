@@ -362,7 +362,7 @@ mod tests {
     use crc32fast::Hasher;
     use usb_gadget::function::custom::CtrlReq;
 
-    use crate::dfu::config::DfuConfig;
+    use crate::dfu::config::{DEFAULT_TRANSFER_SIZE, DfuConfig};
     use crate::dfu::protocol::{request, State, Status};
     use crate::swupdate::SwupdateParams;
 
@@ -372,7 +372,7 @@ mod tests {
         DfuConfig {
             download: SwupdateParams::default(),
             upload: None,
-            transfer_size: 4096,
+            transfer_size: DEFAULT_TRANSFER_SIZE,
             poll_timeout_ms: 10,
         }
     }

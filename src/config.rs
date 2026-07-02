@@ -270,7 +270,7 @@ impl DfuFnConfig {
     /// `serial` is the resolved gadget serial number, embedded in the system
     /// information report when `upload = "sysinfo"`.
     pub fn to_config(&self, serial: &str) -> Result<DfuConfig, ConfigError> {
-        let transfer_size = self.transfer_size.unwrap_or(4096);
+        let transfer_size = self.transfer_size.unwrap_or(crate::dfu::config::DEFAULT_TRANSFER_SIZE);
         let poll_timeout_ms = self.poll_timeout_ms.unwrap_or(10);
 
         let upload = match self.upload.as_deref() {

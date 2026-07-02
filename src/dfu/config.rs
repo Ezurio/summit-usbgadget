@@ -8,6 +8,8 @@ use usb_gadget::function::custom::DfuDesc;
 
 use crate::swupdate::SwupdateParams;
 
+pub const DEFAULT_TRANSFER_SIZE: u16 = 4096;
+
 /// Source served to the host in response to `DFU_UPLOAD`.
 #[derive(Debug, Clone)]
 pub enum UploadSource {
