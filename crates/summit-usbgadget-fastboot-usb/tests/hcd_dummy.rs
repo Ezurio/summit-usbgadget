@@ -6,12 +6,12 @@ use nusb::{
     transfer::{Bulk, Direction, In, Out},
     MaybeFuture,
 };
-use summit_usbgadget::swupdate::SwupdateConfig;
-use summit_usbgadget::swupdate::sysinfo;
-use summit_usbgadget::usb::config::{DeviceConfig, FunctionConfig, GadgetConfig, UsbConfigConfig};
-use summit_usbgadget_fbk::FbkFnConfig;
+use summit_usbgadget_swupdate::SwupdateConfig;
+use summit_usbgadget_swupdate::sysinfo;
+use summit_usbgadget_usb::config::{DeviceConfig, FunctionConfig, GadgetConfig, UsbConfigConfig};
+use summit_usbgadget_fastboot_usb::FastbootUsbFnConfig;
 
-#[path = "../../../tests/hcd_dummy_support/mod.rs"]
+#[path = "../../summit-usbgadget-usb/tests/hcd_dummy_support/mod.rs"]
 mod hcd_dummy_support;
 
 use hcd_dummy_support::{
@@ -44,10 +44,10 @@ fn hcd_dummy_fbk_close_edge_cases() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_fbk_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
-    env.set_output("fbk-fastboot.bin")?;
+    env.set_output("fastboot-usb-fastboot.bin")?;
 
     let config = GadgetConfig {
-        name: Some("summit-usbgadget-fbk-dummy-hcd".to_string()),
+        name: Some("summit-usbgadget-fastboot-usb-dummy-hcd".to_string()),
         udc: None,
         os_descriptor: None,
         device: DeviceConfig {
@@ -67,7 +67,7 @@ fn run_fbk_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
             max_power: Some(100),
             self_powered: Some(false),
             remote_wakeup: Some(false),
-            function: vec![FunctionConfig::plugin(FbkFnConfig {
+            function: vec![FunctionConfig::plugin(FastbootUsbFnConfig {
                 swupdate: SwupdateConfig {
                     download: Some("swupdate".to_string()),
                     software_set: None,
@@ -114,7 +114,7 @@ fn run_fbk_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
 
     assert_eq!(env.read_output()?, b"ABCDEFGH");
 
-    env.set_output("fbk-nxp.bin")?;
+    env.set_output("fastboot-usb-nxp.bin")?;
 
     writer.write_all(b"WOpen:update")?;
     writer.flush()?;
@@ -140,10 +140,10 @@ fn run_fbk_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
 }
 
 fn run_fbk_close_edge_cases(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
-    env.set_output("fbk-close-empty.bin")?;
+    env.set_output("fastboot-usb-close-empty.bin")?;
 
     let config = GadgetConfig {
-        name: Some("summit-usbgadget-fbk-close-dummy-hcd".to_string()),
+        name: Some("summit-usbgadget-fastboot-usb-close-dummy-hcd".to_string()),
         udc: None,
         os_descriptor: None,
         device: DeviceConfig {
@@ -163,7 +163,7 @@ fn run_fbk_close_edge_cases(env: &TestEnvironment) -> Result<(), Box<dyn Error>>
             max_power: Some(100),
             self_powered: Some(false),
             remote_wakeup: Some(false),
-            function: vec![FunctionConfig::plugin(FbkFnConfig {
+            function: vec![FunctionConfig::plugin(FastbootUsbFnConfig {
                 swupdate: SwupdateConfig {
                     download: Some("swupdate".to_string()),
                     software_set: None,

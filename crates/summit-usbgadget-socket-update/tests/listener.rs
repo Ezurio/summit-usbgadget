@@ -1,5 +1,5 @@
 //
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
 
 //! Integration tests for the socket update listener, exercising only its
@@ -15,6 +15,7 @@ fn swupdate_params_follow_socket_source_settings() {
         address: "127.0.0.1:9000".to_string(),
         accept_timeout_secs: Some(3),
         shutdown_timeout_secs: Some(7),
+        inactivity_timeout_secs: Some(20),
         #[cfg(feature = "tls")]
         tls: None,
         software_set: Some("beta".to_string()),
@@ -38,6 +39,7 @@ async fn listener_accepts_plain_tcp_streams() {
         address: "127.0.0.1:0".to_string(),
         accept_timeout_secs: Some(2),
         shutdown_timeout_secs: Some(2),
+        inactivity_timeout_secs: None,
         #[cfg(feature = "tls")]
         tls: None,
         software_set: None,
@@ -72,6 +74,7 @@ async fn listener_times_out_without_client() {
         address: "127.0.0.1:0".to_string(),
         accept_timeout_secs: Some(0),
         shutdown_timeout_secs: Some(2),
+        inactivity_timeout_secs: None,
         #[cfg(feature = "tls")]
         tls: None,
         software_set: None,

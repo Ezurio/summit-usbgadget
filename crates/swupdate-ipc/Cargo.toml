@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Pure-Rust client for the SWUpdate IPC and progress protocols"
 authors.workspace = true
-license = "Ezurio-Clause"
+license = "LicenseRef-Ezurio-Clause"
 
 [features]
 # Async (tokio) client API. The blocking (std) API is always available.

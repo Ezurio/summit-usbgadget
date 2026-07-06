@@ -1,5 +1,5 @@
 //
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
 
 use super::{download_kind, parse_command, parse_download_len, split_command, DownloadKind, ParsedCommand};

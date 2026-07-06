@@ -1,7 +1,7 @@
 # Example configuration for summit-usbgadget.
 #
 # This uses the same TOML schema as the `usb-gadget` CLI tool, with additional
-# `dfu` and `fbk` function types serviced by this daemon. Run with:
+# `dfu` and `fastboot-usb` function types serviced by this daemon. Run with:
 #
 #   sudo summit-usbgadget /etc/summit-usbgadget.toml
 #
@@ -71,6 +71,7 @@ poll_timeout_ms = 10
 # address = "0.0.0.0:9000"
 # accept_timeout_secs = 15
 # shutdown_timeout_secs = 15
+# inactivity_timeout_secs = 30   # idle connection drop; 0 disables
 # software_set = "stable"
 # image_mode = "full"
 # dry_run = false
@@ -80,10 +81,25 @@ poll_timeout_ms = 10
 # server_cert = "/etc/ssl/certs/update-server.pem"
 # server_key = "/etc/ssl/private/update-server.key"
 
-# An FBK-style streamed upload/download interface implemented by this service.
+# Fastboot over TCP (AOSP fastboot "TCP Protocol v1"). Like [socket_source] this
+# is a top-level service, not a `[[config.function]]` gadget function. It offers
+# the same getvar/fetch/download/flash update flow as the USB `fastboot-usb` function but
+# over a TCP socket, so a host can run e.g. `fastboot -s tcp:<device-ip> ...`.
+# [fastboot_tcp]
+# address = "0.0.0.0:5554"      # default; 5554 is the fastboot TCP port
+# accept_timeout_secs = 15       # optional; omit to block waiting for a client
+# inactivity_timeout_secs = 30   # default; idle connection drop, 0 disables
+# serial = "0123456789abcdef"    # advertised via getvar:serialno / sysinfo
+# software_set = "stable"
+# image_mode = "full"
+# dry_run = false
+# disable_store_swu = true
+# timeout_secs = 120
+
+# A fastboot-usb-style streamed upload/download interface implemented by this service.
 # It accepts the same options as the `dfu` function above.
 # [[config.function]]
-# type = "fbk"
+# type = "fastboot-usb"
 # download = "swupdate"         # "swupdate" or "file:/path/to/output"
 # upload = "sysinfo"            # file path, or "sysinfo" for device info
 # transfer_size = 4096

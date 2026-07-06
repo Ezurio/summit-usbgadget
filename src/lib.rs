@@ -1,5 +1,5 @@
 //
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
 
 //! Main application crate for `summit-usbgadget`.
@@ -14,13 +14,3 @@ include!(concat!(env!("OUT_DIR"), "/plugin_links.rs"));
 // The common configuration subsystem is always available; every anchor and
 // plugin reads its own section from the same shared document.
 pub use summit_usbgadget_config as config;
-#[cfg(feature = "dfu")]
-pub use summit_usbgadget_dfu as dfu;
-#[cfg(feature = "fbk")]
-pub use summit_usbgadget_fbk as fbk;
-#[cfg(feature = "socket")]
-pub use summit_usbgadget_socket_update as socket;
-#[cfg(feature = "usb")]
-pub use summit_usbgadget_usb as usb;
-#[cfg(any(feature = "dfu", feature = "fbk"))]
-pub use summit_usbgadget_swupdate as swupdate;

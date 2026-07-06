@@ -1,0 +1,17 @@
+[package]
+name = "summit-usbgadget-fastboot-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Transport-agnostic FBK/fastboot wire-protocol parsing and reply vocabulary"
+license.workspace = true
+
+[dependencies]
+summit-usbgadget-swupdate.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

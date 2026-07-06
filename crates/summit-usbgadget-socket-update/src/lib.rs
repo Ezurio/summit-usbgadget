@@ -23,6 +23,9 @@ pub struct SocketSourceConfig {
     pub address: String,
     pub accept_timeout_secs: Option<u64>,
     pub shutdown_timeout_secs: Option<u64>,
+    /// Idle timeout (seconds) for an established connection; `0` disables it.
+    /// Defaults to 30 seconds so a stalled upload cannot hold the listener.
+    pub inactivity_timeout_secs: Option<u64>,
     // The `[socket_source.tls]` section is only read when the `tls` feature is
     // enabled; without it the section is ignored. Its presence enables TLS.
     #[cfg(feature = "tls")]
@@ -41,6 +44,9 @@ impl summit_usbgadget_config::PluginConfig for SocketSourceConfig {
 fn default_socket_source_address() -> String {
     "0.0.0.0:9000".to_string()
 }
+
+/// Default idle timeout (seconds) applied to an established connection.
+const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 30;
 
 pub struct UpdateSocketListener {
     listener: TcpListener,
@@ -68,6 +74,14 @@ impl SocketSourceConfig {
             dry_run: self.dry_run.unwrap_or(false),
             disable_store_swu: self.disable_store_swu.unwrap_or(true),
             timeout: Duration::from_secs(self.timeout_secs.unwrap_or(120)),
+        }
+    }
+
+    fn inactivity_timeout(&self) -> Option<Duration> {
+        match self.inactivity_timeout_secs {
+            Some(0) => None,
+            Some(secs) => Some(Duration::from_secs(secs)),
+            None => Some(Duration::from_secs(DEFAULT_INACTIVITY_TIMEOUT_SECS)),
         }
     }
 }
@@ -125,7 +139,7 @@ impl UpdateSocketListener {
     }
 }
 
-const SOCKET_READ_BUFFER_SIZE: usize = 64 * 1024;
+const SOCKET_READ_BUFFER_SIZE: usize = 128 * 1024;
 
 fn socket_read_buffer(sink: &mut SwupdateSession) -> BytesMut {
     let mut buf = sink.buffer(SOCKET_READ_BUFFER_SIZE);
@@ -136,11 +150,14 @@ fn socket_read_buffer(sink: &mut SwupdateSession) -> BytesMut {
 pub async fn serve_swupdate(config: &SocketSourceConfig) -> io::Result<()> {
     let listener = UpdateSocketListener::bind(config).await?;
     let params = config.swupdate_params();
+    let inactivity_timeout = config.inactivity_timeout();
 
     loop {
         match listener.accept().await {
             Ok(stream) => {
-                if let Err(err) = stream_to_swupdate(stream, &params, listener.shutdown_timeout()).await {
+                if let Err(err) =
+                    stream_to_swupdate(stream, &params, inactivity_timeout, listener.shutdown_timeout()).await
+                {
                     log::error!("socket update session failed: {err}");
                 }
             }
@@ -155,6 +172,7 @@ pub async fn serve_swupdate(config: &SocketSourceConfig) -> io::Result<()> {
 async fn stream_to_swupdate(
     mut stream: UpdateSocketStream,
     params: &SwupdateParams,
+    inactivity_timeout: Option<Duration>,
     shutdown_timeout: Duration,
 ) -> io::Result<()> {
     let mut sink = SwupdateSession::new(params.clone(), SOCKET_READ_BUFFER_SIZE);
@@ -164,7 +182,12 @@ async fn stream_to_swupdate(
         let mut forwarding = true;
         loop {
             let mut buf = socket_read_buffer(&mut sink);
-            let read = stream.read(&mut buf[..]).await?;
+            let read = match inactivity_timeout {
+                Some(limit) => timeout(limit, stream.read(&mut buf[..]))
+                    .await
+                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "socket update connection inactive"))??,
+                None => stream.read(&mut buf[..]).await?,
+            };
             if read == 0 {
                 break;
             }

@@ -1,10 +1,10 @@
 //
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
-//! FBK command/data state machine.
+//! fastboot-usb command/data state machine.
 //!
-//! Drives one bound FBK function: it services control events, keeps the bulk
-//! OUT receive queue fed, and interprets the FBK / fastboot command stream,
+//! Drives one bound fastboot-usb function: it services control events, keeps the bulk
+//! OUT receive queue fed, and interprets the fastboot-usb / fastboot command stream,
 //! forwarding uploaded firmware into the shared download session.
 
 use std::io;
@@ -17,20 +17,20 @@ use usb_gadget::function::custom::{Custom, EndpointReceiver, EndpointSender, Eve
 use crate::functionfs::EventHandler;
 
 use super::commands;
-use super::protocol::send_static;
+use super::functionfs::send_static;
 use super::{
-    EndpointAction, FbkState, DOWNLOAD_STALL_TIMEOUT, FAIL_BADSIZE, FAIL_CLOSE,
+    EndpointAction, FastbootUsbState, DOWNLOAD_STALL_TIMEOUT, FAIL_BADSIZE, FAIL_CLOSE,
     FAIL_EPIPE, FAIL_NOTOPEN, OKAY, RECV_BUFFER_SIZE,
 };
 
-impl EventHandler for FbkState {
+impl EventHandler for FastbootUsbState {
     async fn handle_event(&mut self, udc_name: &str, event: Event<'_>) -> io::Result<()> {
         match event {
             Event::Enable => {
-                log::info!("[{udc_name}] FBK function enabled");
+                log::info!("[{udc_name}] fastboot-usb function enabled");
             }
             Event::Disable => {
-                log::info!("[{udc_name}] FBK function disabled");
+                log::info!("[{udc_name}] fastboot-usb function disabled");
                 self.reset(udc_name, EndpointAction::Cancel, None).await;
             }
             Event::SetupHostToDevice(req) => {
@@ -46,7 +46,7 @@ impl EventHandler for FbkState {
     }
 }
 
-impl FbkState {
+impl FastbootUsbState {
     pub(super) fn new(
         mut rx: EndpointReceiver,
         tx: EndpointSender,
@@ -59,7 +59,7 @@ impl FbkState {
             tx,
             download_params: download.clone(),
             download: Some(SwupdateSession::new(download, RECV_BUFFER_SIZE)),
-            fbk_session_open: false,
+            fastboot_usb_session_open: false,
             serial,
             download_size: 0,
             downloaded_size: 0,
@@ -70,7 +70,7 @@ impl FbkState {
 
     fn reset_state(&mut self) {
         self.download = Some(SwupdateSession::new(self.download_params.clone(), RECV_BUFFER_SIZE));
-        self.fbk_session_open = false;
+        self.fastboot_usb_session_open = false;
         self.download_size = 0;
         self.downloaded_size = 0;
         self.fastboot_pending_flash = false;
@@ -91,24 +91,24 @@ impl FbkState {
             EndpointAction::Cancel => {
                 if let Err(err) = self.rx.cancel() {
                     if !crate::functionfs::is_closed_transport_error(&err) {
-                        log::debug!("[{udc_name}] FBK receive request cancel failed: {err}");
+                        log::debug!("[{udc_name}] fastboot-usb receive request cancel failed: {err}");
                     }
                 }
             }
             EndpointAction::Halt => {
                 if let Err(err) = self.rx.cancel() {
                     if !crate::functionfs::is_closed_transport_error(&err) {
-                        log::debug!("[{udc_name}] FBK receive request cancel failed: {err}");
+                        log::debug!("[{udc_name}] fastboot-usb receive request cancel failed: {err}");
                     }
                 }
                 match self.rx.control() {
                     Ok(ctrl) => {
                         if let Err(err) = ctrl.halt() {
-                            log::debug!("[{udc_name}] FBK receive endpoint halt failed: {err}");
+                            log::debug!("[{udc_name}] fastboot-usb receive endpoint halt failed: {err}");
                         }
                     }
                     Err(err) => {
-                        log::debug!("[{udc_name}] FBK receive endpoint control unavailable for halt: {err}");
+                        log::debug!("[{udc_name}] fastboot-usb receive endpoint control unavailable for halt: {err}");
                     }
                 }
             }
@@ -213,7 +213,7 @@ impl FbkState {
                 let buf = self.recv_buffer();
                 if let Err(err) = self.rx.try_recv(buf) {
                     if !crate::functionfs::is_closed_transport_error(&err) {
-                        log::debug!("[{udc_name}] FBK reprime error: {err}");
+                        log::debug!("[{udc_name}] fastboot-usb reprime error: {err}");
                     }
                 }
             }
@@ -234,12 +234,12 @@ impl FbkState {
                             if crate::functionfs::is_closed_transport_error(&err) {
                                 if self.download_active() || self.fastboot_pending_flash || self.finish_pending {
                                     log::warn!(
-                                        "[{udc_name}] aborting in-flight FBK/fastboot download: control transport closed while waiting for event: {err}"
+                                        "[{udc_name}] aborting in-flight fastboot-usb/fastboot download: control transport closed while waiting for event: {err}"
                                     );
                                     self.reset(udc_name, EndpointAction::Halt, None).await;
                                 }
                             } else {
-                                log::debug!("[{udc_name}] FBK wait_event error: {err}");
+                                log::debug!("[{udc_name}] fastboot-usb wait_event error: {err}");
                             }
                             continue;
                         }
@@ -247,7 +247,7 @@ impl FbkState {
 
                     if let Err(err) = self.handle_event(udc_name, event).await {
                         if !crate::functionfs::is_closed_transport_error(&err) {
-                            log::error!("[{udc_name}] FBK handle_event error: {err}");
+                            log::error!("[{udc_name}] fastboot-usb handle_event error: {err}");
                         }
                     }
                 }
@@ -256,7 +256,7 @@ impl FbkState {
                     if download_active {
                         timeout(DOWNLOAD_STALL_TIMEOUT, self.rx.fetch_async())
                             .await
-                            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for FBK download data"))?
+                            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for fastboot-usb download data"))?
                     } else {
                         self.rx.fetch_async().await
                     }
@@ -278,7 +278,7 @@ impl FbkState {
                             if err.kind() == io::ErrorKind::TimedOut {
                                 if self.download_active() || self.fastboot_pending_flash || self.finish_pending {
                                     log::warn!(
-                                        "[{udc_name}] failing in-flight FBK/fastboot download: timed out waiting for remaining FBK/fastboot download bytes: {err}"
+                                        "[{udc_name}] failing in-flight fastboot-usb/fastboot download: timed out waiting for remaining fastboot-usb/fastboot download bytes: {err}"
                                     );
                                     self.reset(udc_name, EndpointAction::Cancel, Some(FAIL_BADSIZE)).await;
                                 }
@@ -288,12 +288,12 @@ impl FbkState {
                             if crate::functionfs::is_closed_transport_error(&err) {
                                 if self.download_active() || self.fastboot_pending_flash || self.finish_pending {
                                     log::warn!(
-                                        "[{udc_name}] aborting in-flight FBK/fastboot download: bulk OUT transport closed while waiting for receive completion: {err}"
+                                        "[{udc_name}] aborting in-flight fastboot-usb/fastboot download: bulk OUT transport closed while waiting for receive completion: {err}"
                                     );
                                     self.reset(udc_name, EndpointAction::Halt, None).await;
                                 }
                             } else {
-                                log::debug!("[{udc_name}] FBK bulk recv error: {err}");
+                                log::debug!("[{udc_name}] fastboot-usb bulk recv error: {err}");
                             }
                         }
                     }
@@ -386,7 +386,7 @@ impl FbkState {
                 self.downloaded_size = self.downloaded_size.saturating_add(chunk_len);
 
                 if self.downloaded_size >= self.download_size {
-                    log::warn!("[{udc_name}] FBK download data phase complete");
+                    log::warn!("[{udc_name}] fastboot-usb download data phase complete");
                     let _ = send_static(&mut self.tx, OKAY).await;
                     true
                 } else {
@@ -397,7 +397,7 @@ impl FbkState {
                 if err.kind() == io::ErrorKind::NotConnected {
                     let _ = send_static(&mut self.tx, FAIL_NOTOPEN).await;
                 } else {
-                    log::error!("[{udc_name}] FBK write to SWUpdate failed: {err}");
+                    log::error!("[{udc_name}] fastboot-usb write to SWUpdate failed: {err}");
                     let _ = send_static(&mut self.tx, FAIL_EPIPE).await;
                 }
                 self.reset(udc_name, EndpointAction::Halt, None).await;

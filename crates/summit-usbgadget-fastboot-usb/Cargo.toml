@@ -1,10 +1,10 @@
 [package]
-name = "summit-usbgadget-fbk"
+name = "summit-usbgadget-fastboot-usb"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "FBK upload protocol implementation and config schema for summit-usbgadget"
+description = "fastboot-usb upload protocol implementation and config schema for summit-usbgadget"
 license.workspace = true
 
 [dependencies]
@@ -12,6 +12,7 @@ bytes.workspace = true
 log.workspace = true
 rustix.workspace = true
 serde.workspace = true
+summit-usbgadget-fastboot-proto.workspace = true
 summit-usbgadget-swupdate.workspace = true
 summit-usbgadget-usb.workspace = true
 tokio.workspace = true
@@ -22,4 +23,3 @@ workspace = true
 
 [dev-dependencies]
 nusb.workspace = true
-summit-usbgadget = { path = "../..", features = ["usb", "dfu", "fbk", "socket"] }

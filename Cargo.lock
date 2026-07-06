@@ -464,12 +464,12 @@ name = "summit-usbgadget"
 version = "0.1.0"
 dependencies = [
  "log",
- "nusb",
  "serde",
  "simple_logger",
  "summit-usbgadget-config",
  "summit-usbgadget-dfu",
- "summit-usbgadget-fbk",
+ "summit-usbgadget-fastboot-tcp",
+ "summit-usbgadget-fastboot-usb",
  "summit-usbgadget-socket-update",
  "summit-usbgadget-swupdate",
  "summit-usbgadget-usb",
@@ -506,7 +506,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "summit-usbgadget-fbk"
+name = "summit-usbgadget-fastboot-proto"
+version = "0.1.0"
+dependencies = [
+ "summit-usbgadget-swupdate",
+]
+
+[[package]]
+name = "summit-usbgadget-fastboot-tcp"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "log",
+ "serde",
+ "summit-usbgadget-config",
+ "summit-usbgadget-fastboot-proto",
+ "summit-usbgadget-swupdate",
+ "tokio",
+]
+
+[[package]]
+name = "summit-usbgadget-fastboot-usb"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -514,7 +534,7 @@ dependencies = [
  "nusb",
  "rustix",
  "serde",
- "summit-usbgadget",
+ "summit-usbgadget-fastboot-proto",
  "summit-usbgadget-swupdate",
  "summit-usbgadget-usb",
  "tokio",
@@ -562,7 +582,7 @@ dependencies = [
  "simple_logger",
  "summit-usbgadget-config",
  "summit-usbgadget-dfu",
- "summit-usbgadget-fbk",
+ "summit-usbgadget-fastboot-usb",
  "summit-usbgadget-swupdate",
  "tokio",
  "tokio-udev",

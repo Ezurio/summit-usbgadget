@@ -10,7 +10,7 @@ use summit_usbgadget_dfu::{DfuFnConfig, State as DfuState, Status as DfuStatus, 
 use summit_usbgadget_swupdate::{SwupdateConfig, sysinfo};
 use summit_usbgadget_usb::config::{DeviceConfig, FunctionConfig, GadgetConfig, UsbConfigConfig};
 
-#[path = "../../../tests/hcd_dummy_support/mod.rs"]
+#[path = "../../summit-usbgadget-usb/tests/hcd_dummy_support/mod.rs"]
 mod hcd_dummy_support;
 
 use hcd_dummy_support::{

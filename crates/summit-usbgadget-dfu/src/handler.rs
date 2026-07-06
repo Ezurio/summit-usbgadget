@@ -1,5 +1,5 @@
 //
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
 //! The DFU state machine driven from endpoint zero.
 

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Async TCP/TLS transport for streamed update payloads"
 authors.workspace = true
-license = "Ezurio-Clause"
+license = "LicenseRef-Ezurio-Clause"
 
 [dependencies]
 bytes.workspace = true

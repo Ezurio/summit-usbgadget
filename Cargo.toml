@@ -6,7 +6,9 @@ members = [
 	"crates/swupdate-ipc",
 	"crates/summit-usbgadget-swupdate",
 	"crates/summit-usbgadget-dfu",
-	"crates/summit-usbgadget-fbk",
+	"crates/summit-usbgadget-fastboot-usb",
+	"crates/summit-usbgadget-fastboot-proto",
+	"crates/summit-usbgadget-fastboot-tcp",
 ]
 default-members = ["."]
 resolver = "2"
@@ -16,7 +18,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.84"
 authors = ["Ezurio LLC"]
-license = "Ezurio"
+license = "LicenseRef-Ezurio-Clause"
 
 [workspace.dependencies]
 bytes = "1"
@@ -31,7 +33,9 @@ serde = { version = "1", features = ["derive"] }
 simple_logger = { version = "5", default-features = false }
 summit-usbgadget-config = { path = "crates/summit-usbgadget-config" }
 summit-usbgadget-dfu = { path = "crates/summit-usbgadget-dfu" }
-summit-usbgadget-fbk = { path = "crates/summit-usbgadget-fbk" }
+summit-usbgadget-fastboot-proto = { path = "crates/summit-usbgadget-fastboot-proto" }
+summit-usbgadget-fastboot-tcp = { path = "crates/summit-usbgadget-fastboot-tcp" }
+summit-usbgadget-fastboot-usb = { path = "crates/summit-usbgadget-fastboot-usb" }
 summit-usbgadget-socket-update = { path = "crates/summit-usbgadget-socket-update", default-features = false }
 summit-usbgadget-usb = { path = "crates/summit-usbgadget-usb" }
 summit-usbgadget-swupdate = { path = "crates/summit-usbgadget-swupdate" }
@@ -66,8 +70,9 @@ rust-version.workspace = true
 plugins = [
 	{ crate = "summit-usbgadget-usb", feature = "usb" },
 	{ crate = "summit-usbgadget-dfu", feature = "dfu" },
-	{ crate = "summit-usbgadget-fbk", feature = "fbk" },
+	{ crate = "summit-usbgadget-fastboot-usb", feature = "fastboot-usb" },
 	{ crate = "summit-usbgadget-socket-update", feature = "socket" },
+	{ crate = "summit-usbgadget-fastboot-tcp", feature = "fastboot-tcp" },
 ]
 
 [lib]
@@ -79,10 +84,11 @@ name = "summit-usbgadget"
 path = "src/main.rs"
 
 [features]
-default = ["usb", "dfu", "fbk"]
+default = ["usb", "dfu", "fastboot-usb"]
 usb = ["dep:summit-usbgadget-usb"]
 dfu = ["usb", "dep:summit-usbgadget-dfu", "dep:summit-usbgadget-swupdate"]
-fbk = ["usb", "dep:summit-usbgadget-fbk", "dep:summit-usbgadget-swupdate"]
+fastboot-usb = ["usb", "dep:summit-usbgadget-fastboot-usb", "dep:summit-usbgadget-swupdate"]
+fastboot-tcp = ["dep:summit-usbgadget-fastboot-tcp", "dep:summit-usbgadget-swupdate"]
 socket = ["dep:summit-usbgadget-socket-update", "dep:summit-usbgadget-swupdate"]
 socket-tls = ["socket", "summit-usbgadget-socket-update/tls"]
 
@@ -92,15 +98,13 @@ serde.workspace = true
 simple_logger.workspace = true
 summit-usbgadget-config.workspace = true
 summit-usbgadget-dfu = { workspace = true, optional = true }
-summit-usbgadget-fbk = { workspace = true, optional = true }
+summit-usbgadget-fastboot-tcp = { workspace = true, optional = true }
+summit-usbgadget-fastboot-usb = { workspace = true, optional = true }
 summit-usbgadget-socket-update = { workspace = true, optional = true }
 summit-usbgadget-swupdate = { workspace = true, optional = true }
 summit-usbgadget-usb = { workspace = true, optional = true }
 tokio.workspace = true
 toml.workspace = true
-
-[dev-dependencies]
-nusb.workspace = true
 
 [build-dependencies]
 toml.workspace = true

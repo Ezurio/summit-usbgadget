@@ -1,5 +1,5 @@
 //
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
 //! DFU wire protocol definitions: request codes and the state/status
 //! enumerations (DFU 1.1, section 6.1.2).

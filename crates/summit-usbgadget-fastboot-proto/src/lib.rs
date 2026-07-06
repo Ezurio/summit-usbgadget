@@ -1,42 +1,86 @@
 //
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
-//! FBK / fastboot wire-protocol helpers.
+//! Transport-agnostic FBK / fastboot wire-protocol helpers.
 //!
-//! Reply tokens, command parsers, and small reply-send helpers shared by the
-//! FBK state machine. All parsing is byte-oriented and tolerant of the
-//! whitespace/NUL padding that host tools append to commands.
+//! Reply tokens, command parsers, and reply-formatting helpers shared by every
+//! FBK / fastboot transport (USB bulk endpoints and TCP framing). All parsing
+//! is byte-oriented and tolerant of the whitespace/NUL padding that host tools
+//! append to commands. Nothing here touches a transport, so both the USB
+//! function and the TCP service reuse exactly the same command vocabulary.
 
-use std::io;
-
-use bytes::Bytes;
 use summit_usbgadget_swupdate::sysinfo::SystemInfo;
-use usb_gadget::function::custom::EndpointSender;
 
-pub(super) enum DownloadKind {
+/// Reply token: the requested command completed successfully.
+pub const OKAY: &[u8] = b"OKAY";
+/// Reply token: the reported download size did not match the bytes received.
+pub const FAIL_BADSIZE: &[u8] = b"FAILbad size";
+/// Reply token: closing / finishing the download failed.
+pub const FAIL_CLOSE: &[u8] = b"FAILclose";
+/// Reply token: the command was not recognized.
+pub const FAIL_CMD: &[u8] = b"FAILunknown command";
+/// Reply token: writing the payload to the sink failed.
+pub const FAIL_EPIPE: &[u8] = b"FAILwrite failed";
+/// Reply token: a flash was requested before any download.
+pub const FAIL_FLASH: &[u8] = b"FAILflash before download";
+/// Reply token: no download session is open.
+pub const FAIL_NOTOPEN: &[u8] = b"FAILnot open";
+/// Reply token: opening the download session failed.
+pub const FAIL_OPEN: &[u8] = b"FAILopen failed";
+/// Reply token: the requested partition is unknown.
+pub const FAIL_UNKNOWN_PART: &[u8] = b"FAILpartition does not exist";
+/// Info token: the device is waiting for SWUpdate to finish installing.
+pub const INFO_WAIT_SWUPDATE: &[u8] = b"INFOwaiting for SWUpdate";
+
+/// Whether a `download:` request was issued as a fastboot (`download:%`) or a
+/// plain FBK (`download:`) transfer.
+pub enum DownloadKind {
+    /// Plain FBK download (`download:` / `donwload:`).
     Plain,
+    /// Fastboot download (`download:%`).
     Fastboot,
 }
 
-pub(super) enum FetchTarget {
+/// Target of a fastboot `fetch:` request.
+pub enum FetchTarget {
+    /// `fetch:sysinfo`
     Sysinfo,
+    /// `fetch:sysinfo.json`
     SysinfoJson,
 }
 
-pub(super) enum FlashTarget {
+/// Target partition of a fastboot `flash:` request.
+pub enum FlashTarget {
+    /// `flash:update`
     Update,
+    /// `flash:swu`
     Swu,
 }
 
-pub(super) enum ParsedCommand {
+/// A parsed FBK / fastboot command.
+pub enum ParsedCommand {
+    /// `WOpen:` — open an FBK download session.
     WOpen,
+    /// `getvar:<name>` — read a device variable.
     GetVar,
+    /// `fetch:<target>` — upload device information.
     Fetch(FetchTarget),
+    /// `fetch:<unknown>` — upload of an unsupported partition.
     FetchUnknownPart,
-    Download { len: usize, kind: DownloadKind },
+    /// `download:<len>` — begin a data-phase transfer of `len` bytes.
+    Download {
+        /// Number of bytes the host will send in the data phase.
+        len: usize,
+        /// Whether the transfer is a fastboot or plain FBK download.
+        kind: DownloadKind,
+    },
+    /// `flash:<target>` — install the previously downloaded image.
     Flash(FlashTarget),
+    /// `flash:<unknown>` — flash of an unsupported partition.
     FlashUnknownPart,
+    /// `Close` — finish an FBK download session.
     Close,
+    /// A command this device does not implement.
     Unsupported,
 }
 
@@ -52,7 +96,11 @@ fn trim_command(data: &[u8]) -> &[u8] {
     &data[start..=end]
 }
 
-pub(super) fn split_command(data: &[u8]) -> Option<(&[u8], usize)> {
+/// Splits the first command token off the front of `data`, returning the
+/// command bytes and the number of leading bytes consumed (the command plus any
+/// skipped padding). A `download:` request keeps its fixed-width hex argument
+/// even when the host concatenates the payload immediately after it.
+pub fn split_command(data: &[u8]) -> Option<(&[u8], usize)> {
     let start = data.iter().position(|b| !matches!(*b, b'\0' | b' ' | b'\t' | b'\r' | b'\n'))?;
     let rest = &data[start..];
 
@@ -105,7 +153,8 @@ fn parse_fastboot_fetch(cmd: &[u8]) -> Option<&[u8]> {
     Some(rest.split(|b| *b == b':').next().unwrap_or(rest))
 }
 
-pub(super) fn parse_command(cmd: &[u8]) -> ParsedCommand {
+/// Classifies a single FBK / fastboot command.
+pub fn parse_command(cmd: &[u8]) -> ParsedCommand {
     let cmd = trim_command(cmd);
 
     if cmd.starts_with(b"WOpen:") {
@@ -148,7 +197,7 @@ pub(super) fn parse_command(cmd: &[u8]) -> ParsedCommand {
 
 /// Builds the reply for a fastboot `getvar:<name>` query, or `None` for
 /// variables this device does not expose.
-pub(super) fn fastboot_getvar_reply(cmd: &[u8], serial: &str) -> Option<Vec<u8>> {
+pub fn fastboot_getvar_reply(cmd: &[u8], serial: &str) -> Option<Vec<u8>> {
     match trim_command(cmd) {
         b"getvar:version" => Some(b"OKAY0.4".to_vec()),
         b"getvar:max-download-size" => Some(b"OKAY400000000".to_vec()),
@@ -179,12 +228,9 @@ pub(super) fn fastboot_getvar_reply(cmd: &[u8], serial: &str) -> Option<Vec<u8>>
     }
 }
 
-pub(super) async fn send_static(tx: &mut EndpointSender, data: &'static [u8]) -> io::Result<()> {
-    tx.send_async(Bytes::from_static(data)).await
-}
-
-pub(super) async fn send_data_header(tx: &mut EndpointSender, len: usize) -> io::Result<()> {
-    tx.send_async(Bytes::from(format!("DATA{len:08X}"))).await
+/// Formats the `DATA%08X` data-phase reply header for a payload of `len` bytes.
+pub fn data_header(len: usize) -> String {
+    format!("DATA{len:08X}")
 }
 
 #[cfg(test)]

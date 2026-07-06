@@ -1,0 +1,23 @@
+[package]
+name = "summit-usbgadget-fastboot-tcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Fastboot-over-TCP transport for summit-usbgadget"
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+log.workspace = true
+serde.workspace = true
+summit-usbgadget-config.workspace = true
+summit-usbgadget-fastboot-proto.workspace = true
+summit-usbgadget-swupdate.workspace = true
+tokio.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

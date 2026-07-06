@@ -29,7 +29,7 @@ usb-gadget.workspace = true
 [dev-dependencies]
 nusb.workspace = true
 summit-usbgadget-dfu.workspace = true
-summit-usbgadget-fbk.workspace = true
+summit-usbgadget-fastboot-usb.workspace = true
 summit-usbgadget-swupdate.workspace = true
 
 [build-dependencies]

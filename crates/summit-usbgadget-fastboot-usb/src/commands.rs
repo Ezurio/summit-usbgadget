@@ -3,16 +3,17 @@ use bytes::{Bytes, BytesMut};
 use summit_usbgadget_swupdate::SwupdateSession;
 use summit_usbgadget_swupdate::sysinfo::SystemInfo;
 
-use super::protocol::{
-    fastboot_getvar_reply, parse_command, send_data_header, send_static, DownloadKind,
-    FetchTarget, FlashTarget, ParsedCommand, split_command,
+use super::functionfs::{send_data_header, send_static};
+use summit_usbgadget_fastboot_proto::{
+    fastboot_getvar_reply, parse_command, split_command, DownloadKind, FetchTarget, FlashTarget,
+    ParsedCommand,
 };
 use super::{
-    EndpointAction, FbkState, FAIL_BADSIZE, FAIL_CLOSE, FAIL_CMD, FAIL_FLASH,
+    EndpointAction, FastbootUsbState, FAIL_BADSIZE, FAIL_CLOSE, FAIL_CMD, FAIL_FLASH,
     FAIL_OPEN, FAIL_UNKNOWN_PART, INFO_WAIT_SWUPDATE, OKAY,
 };
 
-async fn begin_download_command(state: &mut FbkState, udc_name: &str, label: &str) -> bool {
+async fn begin_download_command(state: &mut FastbootUsbState, udc_name: &str, label: &str) -> bool {
     let Some(download) = state.download.as_mut() else {
         let _ = send_static(&mut state.tx, FAIL_OPEN).await;
         return false;
@@ -27,7 +28,7 @@ async fn begin_download_command(state: &mut FbkState, udc_name: &str, label: &st
 }
 
 async fn start_finish_download_command(
-    state: &mut FbkState,
+    state: &mut FastbootUsbState,
     udc_name: &str,
     label: &str,
 ) -> bool {
@@ -49,19 +50,19 @@ async fn start_finish_download_command(
     true
 }
 
-async fn handle_wopen_command(state: &mut FbkState, udc_name: &str) -> bool {
-    if !begin_download_command(state, udc_name, "FBK WOpen").await {
+async fn handle_wopen_command(state: &mut FastbootUsbState, udc_name: &str) -> bool {
+    if !begin_download_command(state, udc_name, "fastboot-usb WOpen").await {
         return false;
     }
 
-    state.fbk_session_open = true;
+    state.fastboot_usb_session_open = true;
     state.fastboot_pending_flash = false;
-    log::warn!("[{udc_name}] FBK reply tx: OKAY (WOpen)");
+    log::warn!("[{udc_name}] fastboot-usb reply tx: OKAY (WOpen)");
     let _ = send_static(&mut state.tx, OKAY).await;
     true
 }
 
-async fn handle_fetch_command(state: &mut FbkState, udc_name: &str, target: FetchTarget) -> bool {
+async fn handle_fetch_command(state: &mut FastbootUsbState, udc_name: &str, target: FetchTarget) -> bool {
     let payload = SystemInfo::collect(Some(state.serial.clone())).to_json_bytes();
     let len = payload.len();
     let target = match target {
@@ -81,13 +82,13 @@ async fn handle_fetch_command(state: &mut FbkState, udc_name: &str, target: Fetc
 }
 
 async fn start_download_transfer(
-    state: &mut FbkState,
+    state: &mut FastbootUsbState,
     udc_name: &str,
     len: usize,
     kind: DownloadKind,
 ) -> bool {
     if !state.download.as_ref().is_some_and(SwupdateSession::is_open)
-        && !begin_download_command(state, udc_name, "FBK/fastboot").await
+        && !begin_download_command(state, udc_name, "fastboot-usb/fastboot").await
     {
         return false;
     }
@@ -98,7 +99,7 @@ async fn start_download_transfer(
 
     let fastboot_download = match kind {
         DownloadKind::Fastboot => true,
-        DownloadKind::Plain => !state.fbk_session_open,
+        DownloadKind::Plain => !state.fastboot_usb_session_open,
     };
 
     state.download_size = len;
@@ -106,7 +107,7 @@ async fn start_download_transfer(
     state.fastboot_pending_flash = fastboot_download;
     log::warn!(
         "[{udc_name}] {} reply tx: DATA{:08X} (expecting {} bytes)",
-        if state.fastboot_pending_flash { "fastboot" } else { "FBK" },
+        if state.fastboot_pending_flash { "fastboot" } else { "fastboot-usb" },
         len,
         len
     );
@@ -119,7 +120,7 @@ async fn start_download_transfer(
     true
 }
 
-async fn finish_flash_download(state: &mut FbkState, udc_name: &str, target: FlashTarget) -> bool {
+async fn finish_flash_download(state: &mut FastbootUsbState, udc_name: &str, target: FlashTarget) -> bool {
     if !state.fastboot_pending_flash {
         let _ = send_static(&mut state.tx, FAIL_FLASH).await;
         return false;
@@ -143,8 +144,8 @@ async fn finish_flash_download(state: &mut FbkState, udc_name: &str, target: Fla
     true
 }
 
-async fn handle_close_command(state: &mut FbkState, udc_name: &str) -> bool {
-    if !start_finish_download_command(state, udc_name, "FBK close/finish").await {
+async fn handle_close_command(state: &mut FastbootUsbState, udc_name: &str) -> bool {
+    if !start_finish_download_command(state, udc_name, "fastboot-usb close/finish").await {
         return false;
     }
 
@@ -152,7 +153,7 @@ async fn handle_close_command(state: &mut FbkState, udc_name: &str) -> bool {
 }
 
 pub(super) async fn handle_command_chunk(
-    state: &mut FbkState,
+    state: &mut FastbootUsbState,
     udc_name: &str,
     chunk: &mut BytesMut,
 ) -> bool {
@@ -162,7 +163,7 @@ pub(super) async fn handle_command_chunk(
     let cmd = cmd.to_vec();
     let _ = chunk.split_to(consumed);
 
-    log::warn!("[{udc_name}] FBK command rx: {}", String::from_utf8_lossy(&cmd));
+    log::warn!("[{udc_name}] fastboot-usb command rx: {}", String::from_utf8_lossy(&cmd));
 
     match parse_command(&cmd) {
         ParsedCommand::WOpen => handle_wopen_command(state, udc_name).await,
@@ -172,7 +173,7 @@ pub(super) async fn handle_command_chunk(
                 let _ = state.tx.send_async(Bytes::from(reply)).await;
                 true
             } else {
-                log::warn!("[{udc_name}] unsupported FBK command: {}", String::from_utf8_lossy(&cmd));
+                log::warn!("[{udc_name}] unsupported fastboot-usb command: {}", String::from_utf8_lossy(&cmd));
                 let _ = send_static(&mut state.tx, FAIL_CMD).await;
                 false
             }
@@ -190,7 +191,7 @@ pub(super) async fn handle_command_chunk(
         }
         ParsedCommand::Close => handle_close_command(state, udc_name).await,
         ParsedCommand::Unsupported => {
-            log::warn!("[{udc_name}] unsupported FBK command: {}", String::from_utf8_lossy(&cmd));
+            log::warn!("[{udc_name}] unsupported fastboot-usb command: {}", String::from_utf8_lossy(&cmd));
             let _ = send_static(&mut state.tx, FAIL_CMD).await;
             false
         }

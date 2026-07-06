@@ -38,10 +38,10 @@ In VS Code, the workspace also provides a `build` task.
 
 ## Testing with dummy_hcd
 
-The ignored integration tests in the `summit-usbgadget-dfu` and
-`summit-usbgadget-fbk` crates exercise those protocols against Linux's virtual
-USB loopback controller. This repo does not vendor the kernel module; build and
-load `dummy_hcd` separately.
+The ignored integration tests in the `summit-usbgadget-dfu`,
+`summit-usbgadget-fastboot-usb`, and `summit-usbgadget-usb` crates exercise those
+protocols against Linux's virtual USB loopback controller. This repo does not
+vendor the kernel module; build and load `dummy_hcd` separately.
 
 One supported path is the out-of-tree module published by
 [`xairy/raw-gadget`](https://github.com/xairy/raw-gadget), which includes a
@@ -66,7 +66,8 @@ root:
 
 ```sh
 sudo cargo test -p summit-usbgadget-dfu --test hcd_dummy -- --ignored
-sudo cargo test -p summit-usbgadget-fbk --test hcd_dummy -- --ignored
+sudo cargo test -p summit-usbgadget-fastboot-usb --test hcd_dummy -- --ignored
+sudo cargo test -p summit-usbgadget-usb --test hcd_dummy_protocols -- --ignored
 ```
 
 The test currently assumes a Linux host with root privileges, `configfs`, and a
@@ -106,12 +107,34 @@ and the binary was built with TLS support — the listener serves TLS; otherwise
 accepts plain TCP. It accepts one incoming update stream at a time and forwards
 it into SWUpdate.
 
+### Fastboot over TCP
+
+The daemon can also serve the same fastboot flow as the USB `fastboot-usb` function over
+a TCP socket, using the AOSP fastboot "TCP Protocol v1" framing (a mutual `FB01`
+handshake followed by 8-byte length-prefixed packets). It is compiled in with
+the `fastboot-tcp` cargo feature and runs as a startup service inside the main
+`summit-usbgadget` binary:
+
+```sh
+cargo build --release --features fastboot-tcp
+```
+
+Configure it with a top-level `[fastboot_tcp]` section in the shared
+`summit-usbgadget.toml` (listen `address` defaults to `0.0.0.0:5554`, the
+fastboot TCP port). It serves one host at a time and offers the same
+getvar/fetch/download/flash update flow into SWUpdate, so a host connects with:
+
+```sh
+fastboot -s tcp:<device-ip> getvar:version
+fastboot -s tcp:<device-ip> flash update firmware.swu
+```
+
 ## Configuration file
 
 The configuration uses the same TOML schema as the upstream `usb-gadget` CLI
 tool (a `[device]` table plus one or more `[[config]]` tables, each containing
 `[[config.function]]` entries tagged by `type`), with additional `dfu` and
-`fbk` function types serviced by this daemon. Configurations are therefore compatible
+`fastboot-usb` function types serviced by this daemon. Configurations are therefore compatible
 with the `usb-gadget` tool for the shared function types (`serial`, `net`,
 `msd`). See [usb-gadget2.toml](usb-gadget2.toml) for a complete example.
 
@@ -194,7 +217,7 @@ Top-level:
   `interface_class`, `interface_sub_class`, `interface_protocol`
 - `msd`: `stall`, plus `[[config.function.lun]]` with
   `file`, `read_only`, `cdrom`, `no_fua`, `removable`, `inquiry_string`
-- `dfu` and `fbk`: `download`, `upload`, `transfer_size`, `poll_timeout_ms`,
+- `dfu` and `fastboot-usb`: `download`, `upload`, `transfer_size`, `poll_timeout_ms`,
   `software_set`, `image_mode`, `dry_run`, `disable_store_swu`, `timeout_secs`,
   optional `download_socket.address`, `download_socket.accept_timeout_secs`,
   `download_socket.shutdown_timeout_secs`, and `download_socket.tls.*`
@@ -268,10 +291,10 @@ sudo dfu-util -D firmware.dfu
 sudo dfu-util -U readback.bin
 ```
 
-For FBK / UUU uploads, keep using the raw `.swu` bundle; the DFU suffix wrapper
+For fastboot-usb / UUU uploads, keep using the raw `.swu` bundle; the DFU suffix wrapper
 is only for the DFU transport.
 
-The FBK function also exposes a small fastboot-compatible subset used by host
+The fastboot-usb function also exposes a small fastboot-compatible subset used by host
 tools and recovery flows:
 
 - `getvar:<name>` for the built-in variables implemented by the daemon
@@ -283,7 +306,7 @@ tools and recovery flows:
   by existing host flows)
 - `flash:update` and `flash:swu`
 
-The legacy FBK control commands `WOpen:<...>` and `Close` are also accepted for
+The legacy fastboot-usb control commands `WOpen:<...>` and `Close` are also accepted for
 UUU-style upload flows.
 
 ### Example i.MX8MM UUU recovery update
@@ -299,7 +322,7 @@ The script expects these placeholder artifacts in the current directory:
 - `_Image` — recovery kernel.
 - `_board.dtb` — recovery device tree.
 - `_initramfs.cpio.gz.uboot` — recovery initramfs containing `/linuxrc`, the
-  fastboot-kernel (`FBK`) agent, and `fw_update`.
+  fastboot-kernel (`fastboot-usb`) agent, and `fw_update`.
 - `_update.swu` — SWUpdate bundle to install.
 
 Run it with:
@@ -342,7 +365,7 @@ without persisting a copy of the SWU. The manifestation phase awaits a terminal
 result on the SWUpdate progress interface, which is mapped to the DFU status
 reported to the host.
 
-When `download = "socket"`, each DFU or FBK block is streamed to one incoming
+When `download = "socket"`, each DFU or fastboot-usb block is streamed to one incoming
 connection accepted on the configured local socket instead. Without a
 `download_socket.tls` table the session is a plain TCP stream. Adding
 `download_socket.tls` switches to OpenSSL-backed server-side TLS, with a server
