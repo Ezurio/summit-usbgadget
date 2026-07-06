@@ -71,9 +71,8 @@ impl InstallConn {
         Ok(())
     }
 
-    /// Flushes and closes the connection.
+    /// Closes the connection.
     pub async fn end(mut self) -> Result<()> {
-        self.stream.flush().await?;
         self.stream.shutdown().await?;
         Ok(())
     }
@@ -83,7 +82,7 @@ impl InstallConn {
         self.stream
     }
 
-    /// Streams an entire async source into SWUpdate, then flushes and closes
+    /// Streams an entire async source into SWUpdate, then closes
     /// the connection.
     ///
     /// The transfer runs through a single [`tokio::io::copy`] loop, so the
@@ -103,9 +102,11 @@ impl AsyncWrite for InstallConn {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.stream).poll_write(cx, buf)
     }
+
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.stream).poll_flush(cx)
     }
+
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.stream).poll_shutdown(cx)
     }
@@ -150,11 +151,31 @@ pub async fn get_status_timeout(duration: Duration) -> Result<Option<IpcMessage>
     }
 }
 
+/// Queries the installer status with a receive timeout and decodes the current
+/// and last-result recovery states.
+pub async fn get_status_values_timeout(
+    duration: Duration,
+) -> Result<Option<(Option<crate::RecoveryStatus>, Option<crate::RecoveryStatus>)>> {
+    let Some(msg) = get_status_timeout(duration).await? else {
+        return Ok(None);
+    };
+
+    // SAFETY: get_status replies always use the `status` union member.
+    let (current_raw, last_result_raw) = unsafe {
+        (msg.data.status.current, msg.data.status.last_result)
+    };
+
+    Ok(Some((
+        crate::RecoveryStatus::try_from(current_raw).ok(),
+        crate::RecoveryStatus::try_from(last_result_raw).ok(),
+    )))
+}
+
 /// Waits for a terminal SWUpdate install result within `timeout`, using the
 /// control status socket.
 ///
-/// Returns `Ok(())` once SWUpdate has reported success and then later
-/// returned to `Idle`, `Err(Error::InstallFailed)` on terminal failure, and
+/// Returns `Ok(())` once SWUpdate has reported success, `Err(Error::InstallFailed)`
+/// on terminal failure, and
 /// `Err(Error::Timeout)` if the deadline elapses.
 pub async fn await_install_result(timeout: Duration) -> Result<()> {
     use crate::RecoveryStatus;
@@ -194,7 +215,7 @@ pub async fn await_install_result(timeout: Duration) -> Result<()> {
 
         match last_result_now {
             Some(RecoveryStatus::Failure) => return Err(Error::InstallFailed),
-            Some(RecoveryStatus::Idle) if current == Some(RecoveryStatus::Run) => {
+            Some(RecoveryStatus::Success) if current == Some(RecoveryStatus::Run) => {
                 return Ok(());
             }
             _ => {}

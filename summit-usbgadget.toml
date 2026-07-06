@@ -65,6 +65,21 @@ poll_timeout_ms = 10
 # upload = "sysinfo"
 # upload = "/var/tmp/readback.bin"
 
+# A non-USB socket update source is configured separately at the top level.
+# It is not a `[[config.function]]` entry because it is not a gadget function.
+# [socket_source]
+# address = "0.0.0.0:9000"
+# accept_timeout_secs = 15
+# shutdown_timeout_secs = 15
+# software_set = "stable"
+# image_mode = "full"
+# dry_run = false
+# disable_store_swu = true
+# timeout_secs = 120
+# [socket_source.tls]
+# server_cert = "/etc/ssl/certs/update-server.pem"
+# server_key = "/etc/ssl/private/update-server.key"
+
 # An FBK-style streamed upload/download interface implemented by this service.
 # It accepts the same options as the `dfu` function above.
 # [[config.function]]

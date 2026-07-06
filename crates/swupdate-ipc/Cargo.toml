@@ -1,9 +1,9 @@
 [package]
 name = "swupdate-ipc"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Pure-Rust client for the SWUpdate IPC and progress protocols"
-authors = ["Ezurio LLC"]
+authors.workspace = true
 license = "Ezurio-Clause"
 
 [features]
@@ -11,9 +11,9 @@ license = "Ezurio-Clause"
 async = ["dep:tokio", "dep:futures-util"]
 
 [dependencies]
+futures-util = { workspace = true, optional = true }
 thiserror = "2"
-tokio = { version = "1", features = ["net", "io-util", "time"], optional = true }
-futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+tokio = { workspace = true, optional = true }
 
 [lib]
 crate-type = ["rlib"]

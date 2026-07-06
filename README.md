@@ -34,6 +34,45 @@ Supported functions:
 cargo build --release
 ```
 
+In VS Code, the workspace also provides a `build` task.
+
+## Testing with dummy_hcd
+
+The ignored integration tests in the `summit-usbgadget-dfu` and
+`summit-usbgadget-fbk` crates exercise those protocols against Linux's virtual
+USB loopback controller. This repo does not vendor the kernel module; build and
+load `dummy_hcd` separately.
+
+One supported path is the out-of-tree module published by
+[`xairy/raw-gadget`](https://github.com/xairy/raw-gadget), which includes a
+copy of the `dummy_hcd` module source and helper scripts:
+
+```sh
+git clone https://github.com/xairy/raw-gadget
+cd raw-gadget/dummy_hcd
+
+# Match the module source to the target kernel when needed.
+./update.sh 6.12
+
+make
+sudo ./insmod.sh
+```
+
+That requires the matching kernel headers for the running kernel, typically via
+your distro's `linux-headers-$(uname -r)` package.
+
+After `dummy_hcd` is loaded and `configfs` is mounted, run the ignored tests as
+root:
+
+```sh
+sudo cargo test -p summit-usbgadget-dfu --test hcd_dummy -- --ignored
+sudo cargo test -p summit-usbgadget-fbk --test hcd_dummy -- --ignored
+```
+
+The test currently assumes a Linux host with root privileges, `configfs`, and a
+working `dummy_hcd` UDC. Unload the module afterwards if you no longer need the
+virtual controller.
+
 ## Run
 
 The gadget composition is read from a configuration file. Provide the path as
@@ -44,7 +83,28 @@ back to the default `/etc/summit-usbgadget.toml`:
 sudo ./target/release/summit-usbgadget /etc/summit-usbgadget.toml
 ```
 
+In VS Code, the workspace `run` task builds the release binary first and then
+starts it with the repository's `summit-usbgadget.toml` example config.
+
 `RUST_LOG` controls log verbosity (`error`/`warn`/`info`/`debug`/`trace`).
+
+### Socket SWUpdate source
+
+The daemon can also accept firmware over a plain TCP or TLS socket, independent
+of USB. It is compiled in with the `socket` cargo feature (or `socket-tls` to
+include OpenSSL TLS support) and runs as a startup service inside the main
+`summit-usbgadget` binary — there is no separate executable:
+
+```sh
+cargo build --release --features socket-tls
+```
+
+Configure it with a top-level `[socket_source]` section in the shared
+`summit-usbgadget.toml`. When a `[socket_source.tls]` sub-section is present —
+and the binary was built with TLS support — the listener serves TLS; otherwise
+(or when built without TLS support, in which case the section is ignored) it
+accepts plain TCP. It accepts one incoming update stream at a time and forwards
+it into SWUpdate.
 
 ## Configuration file
 
@@ -82,7 +142,7 @@ class = "ncm"                 # ecm | ecm_subset | eem | ncm | rndis
 
 [[config.function]]
 type = "dfu"
-download = "swupdate"         # swupdate | file:/path/to/output
+download = "swupdate"         # swupdate | socket
 transfer_size = 4096
 poll_timeout_ms = 10
 # software_set = "main"
@@ -90,7 +150,20 @@ poll_timeout_ms = 10
 # dry_run = false
 # disable_store_swu = true
 # timeout_secs = 120
-# upload = "/var/tmp/readback.bin"
+
+# Stream to an incoming TCP or TLS socket instead of local SWUpdate.
+# download = "socket"
+# [config.function.download_socket]
+# address = "0.0.0.0:8443"
+# accept_timeout_secs = 15
+# shutdown_timeout_secs = 15
+# [config.function.download_socket.tls]
+# server_cert = "/etc/ssl/certs/update-server.pem"
+# server_key = "/etc/ssl/private/update-server.key"
+# request_client_cert = false
+# ca_cert = "/etc/ssl/certs/update-ca.pem"
+# ignore_expiration = true
+# fips = false
 ```
 
 ### Option reference
@@ -122,7 +195,22 @@ Top-level:
 - `msd`: `stall`, plus `[[config.function.lun]]` with
   `file`, `read_only`, `cdrom`, `no_fua`, `removable`, `inquiry_string`
 - `dfu` and `fbk`: `download`, `upload`, `transfer_size`, `poll_timeout_ms`,
-  `software_set`, `image_mode`, `dry_run`, `disable_store_swu`, `timeout_secs`
+  `software_set`, `image_mode`, `dry_run`, `disable_store_swu`, `timeout_secs`,
+  optional `download_socket.address`, `download_socket.accept_timeout_secs`,
+  `download_socket.shutdown_timeout_secs`, and `download_socket.tls.*`
+
+`download_socket.tls` accepts:
+
+- `server_cert`, `server_key` — PEM server certificate chain and private key
+  presented by the listener.
+- `request_client_cert` — request and validate an incoming client certificate
+  against `ca_cert` (mutual TLS). Requires `ca_cert` to be set.
+- `ca_cert` — PEM CA certificate that incoming client certificates are validated
+  against when `request_client_cert` is enabled.
+- `ignore_expiration` — ignore client-certificate validity timestamps during
+  validation (default `true`).
+- `fips` — enable OpenSSL 3 FIPS mode for TLS operations. This requires an
+  OpenSSL 3 build with the FIPS provider installed.
 
 A `msd` function takes one or more `[[config.function.lun]]` tables with a
 `file` backing path. Function types this service does not implement (e.g. `hid`,
@@ -254,6 +342,14 @@ without persisting a copy of the SWU. The manifestation phase awaits a terminal
 result on the SWUpdate progress interface, which is mapped to the DFU status
 reported to the host.
 
+When `download = "socket"`, each DFU or FBK block is streamed to one incoming
+connection accepted on the configured local socket instead. Without a
+`download_socket.tls` table the session is a plain TCP stream. Adding
+`download_socket.tls` switches to OpenSSL-backed server-side TLS, with a server
+certificate/key and optional client-certificate validation against a provided
+PEM CA. The socket transport completes when the stream
+is cleanly shut down, and it does not trigger the local SWUpdate reboot path.
+
 #### A/B slot selection
 
 SWUpdate writes the update to the correct slot. The target is a pure **runtime**
@@ -278,5 +374,4 @@ decision (the user has no choice), determined by running `boot-rootfs.sh`
 - [src/gadget.rs](src/gadget.rs) — builds and binds a composite gadget on a UDC.
 - [src/dfu/](src/dfu) — the DFU 1.1 protocol module: state/status enumerations,
   configuration, firmware sinks (SWUpdate IPC or file), and the handler.
-- [src/swupdate/](src/swupdate) — SWUpdate transport dispatch with split IPC and pipe backends.
-
+- [src/swupdate/](src/swupdate) — update transport dispatch with local SWUpdate IPC/pipe and remote socket backends.

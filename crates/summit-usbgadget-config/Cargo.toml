@@ -1,0 +1,23 @@
+[package]
+name = "summit-usbgadget-config"
+version.workspace = true
+description = "Common configuration subsystem shared by summit-usbgadget plugins"
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "summit_usbgadget_config"
+path = "src/lib.rs"
+
+[dependencies]
+futures-util.workspace = true
+inventory.workspace = true
+log.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

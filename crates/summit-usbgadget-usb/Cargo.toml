@@ -1,0 +1,39 @@
+[package]
+name = "summit-usbgadget-usb"
+version.workspace = true
+description = "USB gadget runtime/plugin for summit-usbgadget"
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "summit_usbgadget_usb"
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dependencies]
+futures-util.workspace = true
+inventory.workspace = true
+log.workspace = true
+serde.workspace = true
+simple_logger.workspace = true
+summit-usbgadget-config.workspace = true
+tokio.workspace = true
+tokio-udev.workspace = true
+toml.workspace = true
+usb-gadget.workspace = true
+
+[dev-dependencies]
+nusb.workspace = true
+summit-usbgadget-dfu.workspace = true
+summit-usbgadget-fbk.workspace = true
+summit-usbgadget-swupdate.workspace = true
+
+[build-dependencies]
+toml.workspace = true
+
+[lints]
+workspace = true

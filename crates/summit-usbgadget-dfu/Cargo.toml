@@ -1,0 +1,25 @@
+[package]
+name = "summit-usbgadget-dfu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "USB DFU protocol implementation and config schema for summit-usbgadget"
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+crc32fast.workspace = true
+log.workspace = true
+rustix.workspace = true
+serde.workspace = true
+summit-usbgadget-swupdate.workspace = true
+summit-usbgadget-usb.workspace = true
+usb-gadget.workspace = true
+
+[dev-dependencies]
+nusb.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -1,12 +1,74 @@
-[package]
-name = "summit-usbgadget"
+[workspace]
+members = [
+	"crates/summit-usbgadget-config",
+	"crates/summit-usbgadget-usb",
+	"crates/summit-usbgadget-socket-update",
+	"crates/swupdate-ipc",
+	"crates/summit-usbgadget-swupdate",
+	"crates/summit-usbgadget-dfu",
+	"crates/summit-usbgadget-fbk",
+]
+default-members = ["."]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
-description = "Runtime-configurable composite USB gadget with a DFU function that streams firmware into SWUpdate."
-license = "Ezurio"
-authors = ["Ezurio LLC"]
 edition = "2021"
 rust-version = "1.84"
-resolver = "2"
+authors = ["Ezurio LLC"]
+license = "Ezurio"
+
+[workspace.dependencies]
+bytes = "1"
+crc32fast = "1.5"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+inventory = "0.3"
+log = "0.4"
+nusb = "0.2"
+openssl = "0.10"
+rustix = { version = "1.1.4", features = ["fs", "system"] }
+serde = { version = "1", features = ["derive"] }
+simple_logger = { version = "5", default-features = false }
+summit-usbgadget-config = { path = "crates/summit-usbgadget-config" }
+summit-usbgadget-dfu = { path = "crates/summit-usbgadget-dfu" }
+summit-usbgadget-fbk = { path = "crates/summit-usbgadget-fbk" }
+summit-usbgadget-socket-update = { path = "crates/summit-usbgadget-socket-update", default-features = false }
+summit-usbgadget-usb = { path = "crates/summit-usbgadget-usb" }
+summit-usbgadget-swupdate = { path = "crates/summit-usbgadget-swupdate" }
+swupdate-ipc = { path = "crates/swupdate-ipc", features = ["async"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio-openssl = "0.6"
+tokio-udev = "0.10"
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
+usb-gadget = { version = "1.2", features = ["tokio"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_results = "deny"
+warnings = "deny"
+unnameable_types = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+
+[package]
+name = "summit-usbgadget"
+version.workspace = true
+description = "Runtime-configurable update app with pluggable USB gadget and socket transports."
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[package.metadata.summit-usbgadget]
+plugins = [
+	{ crate = "summit-usbgadget-usb", feature = "usb" },
+	{ crate = "summit-usbgadget-dfu", feature = "dfu" },
+	{ crate = "summit-usbgadget-fbk", feature = "fbk" },
+	{ crate = "summit-usbgadget-socket-update", feature = "socket" },
+]
 
 [lib]
 name = "summit_usbgadget"
@@ -17,45 +79,34 @@ name = "summit-usbgadget"
 path = "src/main.rs"
 
 [features]
-default = ["dfu", "fbk"]
-dfu = [
-	"dep:swupdate-ipc",
-	"tokio/fs",
-	"tokio/io-util",
-	"tokio/process",
-	"tokio/time",
-]
-fbk = [
-	"dep:swupdate-ipc",
-	"tokio/io-util",
-	"tokio/process",
-	"tokio/time",
-]
+default = ["usb", "dfu", "fbk"]
+usb = ["dep:summit-usbgadget-usb"]
+dfu = ["usb", "dep:summit-usbgadget-dfu", "dep:summit-usbgadget-swupdate"]
+fbk = ["usb", "dep:summit-usbgadget-fbk", "dep:summit-usbgadget-swupdate"]
+socket = ["dep:summit-usbgadget-socket-update", "dep:summit-usbgadget-swupdate"]
+socket-tls = ["socket", "summit-usbgadget-socket-update/tls"]
 
 [dependencies]
-usb-gadget = { version = "1.2", features = ["tokio"] }
-log = "0.4"
-simple_logger = { version = "5", default-features = false }
-serde = { version = "1", features = ["derive"] }
-toml = { version = "1", default-features = false, features = ["parse", "serde"] }
-swupdate-ipc = { path = "crates/swupdate-ipc", features = ["async"], optional = true }
-tokio = { version = "1", features = ["rt", "macros", "signal"] }
-tokio-udev = "0.10"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-bytes = "1"
-crc32fast = "1.5"
-rustix = { version = "1.1.4", features = ["fs", "system"] }
+log.workspace = true
+serde.workspace = true
+simple_logger.workspace = true
+summit-usbgadget-config.workspace = true
+summit-usbgadget-dfu = { workspace = true, optional = true }
+summit-usbgadget-fbk = { workspace = true, optional = true }
+summit-usbgadget-socket-update = { workspace = true, optional = true }
+summit-usbgadget-swupdate = { workspace = true, optional = true }
+summit-usbgadget-usb = { workspace = true, optional = true }
+tokio.workspace = true
+toml.workspace = true
 
-[lints.rust]
-unsafe_code = "deny"
-unused_results = "deny"
-warnings = "deny"
-unnameable_types = "warn"
-unreachable_pub = "warn"
-unsafe_op_in_unsafe_fn = "warn"
-unused_lifetimes = "warn"
-unused_macro_rules = "warn"
-unused_qualifications = "warn"
+[dev-dependencies]
+nusb.workspace = true
+
+[build-dependencies]
+toml.workspace = true
+
+[lints]
+workspace = true
 
 [profile.dev]
 incremental = true

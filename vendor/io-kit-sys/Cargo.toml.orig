@@ -1,0 +1,19 @@
+[package]
+name = "io-kit-sys"
+version = "0.5.0"
+links = "IOKit"
+build = "build.rs"
+
+description.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+core-foundation-sys = "0.8"
+mach2 = { workspace = true }

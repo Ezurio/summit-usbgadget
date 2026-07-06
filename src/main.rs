@@ -16,9 +16,6 @@
 
 use std::path::PathBuf;
 
-use summit_usbgadget::config::GadgetConfig;
-use summit_usbgadget::gadget;
-
 /// Default configuration file path when none is given on the command line.
 const DEFAULT_CONFIG_PATH: &str = "/etc/summit-usbgadget.toml";
 
@@ -31,42 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init()
         .unwrap();
 
-    #[cfg(any(feature = "dfu", feature = "fbk"))]
-    summit_usbgadget::sysinfo::init().await;
-
-    let config_path = config_path_from_args();
-    log::info!("loading gadget configuration from {}", config_path.display());
-    let config = match GadgetConfig::load(&config_path) {
-        Ok(config) => config,
-        Err(err) => {
-            if let Err(reset_err) = gadget::reset() {
-                log::warn!("failed to remove gadgets after configuration load error: {reset_err}");
-            }
-            return Err(err.into());
-        }
-    };
-
-    #[cfg(unix)]
-    {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-
-        gadget::serve_until(config, async {
-            tokio::select! {
-                _ = sigterm.recv() => {
-                    log::info!("received SIGTERM, shutting down gadget service");
-                }
-                _ = sigint.recv() => {
-                    log::info!("received SIGINT, shutting down gadget service");
-                }
-            }
-        }).await
-    }
-
-    #[cfg(not(unix))]
-    {
-        gadget::serve(config).await
-    }
+    // Start every compiled-in plugin's registered service. Each plugin reads
+    // its own section from the shared configuration file and runs itself.
+    summit_usbgadget::config::run_services(config_path_from_args()).await
 }
 
 /// Determines the configuration file path from the command line or environment.

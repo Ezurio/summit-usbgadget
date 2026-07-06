@@ -1,0 +1,32 @@
+[package]
+name = "summit-usbgadget-socket-update"
+version.workspace = true
+edition.workspace = true
+description = "Async TCP/TLS transport for streamed update payloads"
+authors.workspace = true
+license = "Ezurio-Clause"
+
+[dependencies]
+bytes.workspace = true
+log.workspace = true
+openssl = { workspace = true, optional = true }
+serde.workspace = true
+simple_logger.workspace = true
+summit-usbgadget-config.workspace = true
+summit-usbgadget-swupdate.workspace = true
+tokio.workspace = true
+tokio-openssl = { workspace = true, optional = true }
+toml.workspace = true
+
+[features]
+default = ["tls"]
+# TLS on the socket listener via OpenSSL. Disable to drop the openssl /
+# tokio-openssl dependencies entirely (plain TCP only).
+tls = ["dep:openssl", "dep:tokio-openssl"]
+
+[lib]
+crate-type = ["rlib"]
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(ossl300)"]
