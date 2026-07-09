@@ -115,6 +115,20 @@ impl RunningGadget {
     }
 
     async fn shutdown(mut self) {
+        // Unbind from the UDC before aborting tasks.  On ARM platforms using
+        // the ci_hdrc USB controller, calling io_cancel while a bulk-OUT DMA
+        // transfer is in flight triggers a kernel crash:
+        //   ffs_aio_cancel → ep_dequeue [ci_hdrc] → usb_gadget_unmap_request
+        //   → dma_direct_unmap_sg → dcache_inval_poc (fault)
+        //
+        // Writing "\n" to the UDC configfs file is a synchronous kernel call
+        // that stops the controller and completes (with error) every pending
+        // FunctionFS AIO request before returning.  After that, io_cancel
+        // finds no in-flight operation and returns EINVAL without touching DMA.
+        if let Err(err) = self._reg.bind(None) {
+            log::warn!("failed to unbind gadget from UDC before task shutdown: {err}");
+        }
+
         let tasks = std::mem::take(&mut self.tasks);
 
         for task in &tasks {
