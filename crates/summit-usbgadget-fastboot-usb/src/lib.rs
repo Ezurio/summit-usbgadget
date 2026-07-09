@@ -73,7 +73,9 @@ summit_usbgadget_usb::declare_usb_function!("fastboot-usb" => FastbootUsbFnConfi
 
 /// Fixed capacity used for every receive buffer for the entire lifetime of a
 /// bound fastboot-usb function.
-const RECV_BUFFER_SIZE: usize = 128 * 1024;
+/// ci_hdrc (USB Mentor/ChipIdea) rejects any single request larger than 16 KB,
+/// so this must not exceed 16384.
+const RECV_BUFFER_SIZE: usize = 16 * 1024;
 /// Number of receive buffers kept simultaneously submitted to the kernel AIO
 /// queue.
 const RECV_QUEUE_DEPTH: usize = 1;
