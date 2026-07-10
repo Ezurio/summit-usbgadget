@@ -113,6 +113,10 @@ struct FastbootUsbState {
     downloaded_size: usize,
     fastboot_pending_flash: bool,
     finish_pending: bool,
+    /// Whether the function is currently enabled by a connected host. While
+    /// disabled (e.g. no USB cable attached) no bulk-OUT read is primed, so the
+    /// kernel AIO context has nothing in flight and teardown cannot block.
+    enabled: bool,
 }
 
 pub fn build(cfg: &FastbootUsbFnConfig, serial: &str) -> Result<(Handle, FastbootUsbRuntime), SwupdateConfigError> {

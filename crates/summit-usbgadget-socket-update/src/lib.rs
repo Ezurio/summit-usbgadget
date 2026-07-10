@@ -169,6 +169,16 @@ pub async fn serve_swupdate(config: &SocketSourceConfig) -> io::Result<()> {
     }
 }
 
+/// How the pump loop ended.
+enum PumpEnd {
+    /// The source stopped sending: either a clean EOF (read returned 0) or a
+    /// read failure/inactivity timeout. Both are handled the same way — flush
+    /// EOF into the queue and let swupdate render the verdict.
+    SourceClosed,
+    /// swupdate reached its verdict while the source was still connected.
+    SwupdateDone,
+}
+
 async fn stream_to_swupdate(
     mut stream: UpdateSocketStream,
     params: &SwupdateParams,
@@ -176,61 +186,82 @@ async fn stream_to_swupdate(
     shutdown_timeout: Duration,
 ) -> io::Result<()> {
     let mut sink = SwupdateSession::new(params.clone(), SOCKET_READ_BUFFER_SIZE);
-    let mut received_payload = false;
 
-    let result = async {
-        let mut forwarding = true;
-        loop {
-            let mut buf = socket_read_buffer(&mut sink);
-            let read = match inactivity_timeout {
-                Some(limit) => timeout(limit, stream.read(&mut buf[..]))
-                    .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "socket update connection inactive"))??,
-                None => stream.read(&mut buf[..]).await?,
-            };
-            if read == 0 {
-                break;
-            }
-
-            received_payload = true;
-
-            // A swupdate failure aborts immediately so the client sees the
-            // connection error. Early success keeps draining to EOF below.
-            if sink.is_open() {
-                if let Some(Err(err)) = sink.try_finished() {
-                    return Err(err);
-                }
-            }
-
-            if forwarding {
-                buf.truncate(read);
-                if matches!(sink.send(buf).await?, Feed::Closed) {
-                    // swupdate is done; keep draining the client to EOF but
-                    // discard — uploaders send the whole file regardless.
-                    forwarding = false;
-                }
-            }
+    let result = match pump(&mut stream, &mut sink, inactivity_timeout).await {
+        // Source stopped sending (clean EOF, read error, or inactivity timeout):
+        // flush EOF into swupdate and let it render the verdict on what arrived.
+        Ok(PumpEnd::SourceClosed) if sink.is_open() => {
+            sink.eof();
+            sink.finished().await
         }
-
-        if !received_payload {
+        // Source closed before sending any payload: nothing to do, go idle.
+        Ok(PumpEnd::SourceClosed) => {
             log::warn!("socket update connection closed without payload");
-            return Ok(());
+            Ok(())
         }
-
-        sink.eof();
-        sink.finished().await?;
-
-        Ok(())
-    }
-    .await;
+        // swupdate finished while the source was still connected: drop it.
+        Ok(PumpEnd::SwupdateDone) => Ok(()),
+        Err(err) => Err(err),
+    };
 
     if result.is_err() {
         sink.abort().await;
     }
 
+    // Closing the connection means sending EOF (FIN) on the stream.
     timeout(shutdown_timeout, stream.shutdown())
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "socket shutdown timed out"))??;
 
     result
+}
+
+/// Pumps source bytes into swupdate until one side finishes.
+async fn pump(
+    stream: &mut UpdateSocketStream,
+    sink: &mut SwupdateSession,
+    inactivity_timeout: Option<Duration>,
+) -> io::Result<PumpEnd> {
+    loop {
+        let mut buf = socket_read_buffer(sink);
+        let read = match read_with_timeout(stream, &mut buf[..], inactivity_timeout).await {
+            // A read error or inactivity timeout is treated like a clean EOF:
+            // stop reading and let swupdate judge what was received.
+            Err(err) => {
+                log::warn!("socket update read failed, flushing to swupdate: {err}");
+                return Ok(PumpEnd::SourceClosed);
+            }
+            Ok(0) => return Ok(PumpEnd::SourceClosed),
+            Ok(read) => read,
+        };
+
+        // swupdate may reach its verdict mid-transfer: a failure surfaces as an
+        // error, an early success lets us stop and drop the connection.
+        if sink.is_open() {
+            if let Some(result) = sink.try_finished() {
+                return result.map(|()| PumpEnd::SwupdateDone);
+            }
+        }
+
+        buf.truncate(read);
+        if matches!(sink.send(buf).await?, Feed::Closed) {
+            return Ok(PumpEnd::SwupdateDone);
+        }
+    }
+}
+
+/// Reads from `stream`, enforcing `inactivity_timeout` when set: if no bytes
+/// arrive within the limit the read fails with a `TimedOut` error, which the
+/// caller folds into a source close (flush EOF, let swupdate decide).
+async fn read_with_timeout(
+    stream: &mut UpdateSocketStream,
+    buf: &mut [u8],
+    inactivity_timeout: Option<Duration>,
+) -> io::Result<usize> {
+    match inactivity_timeout {
+        Some(limit) => timeout(limit, stream.read(buf))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "socket update connection inactive"))?,
+        None => stream.read(buf).await,
+    }
 }

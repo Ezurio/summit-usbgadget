@@ -206,19 +206,37 @@ pub async fn await_install_result(timeout: Duration) -> Result<()> {
             (msg.data.status.current, msg.data.status.last_result)
         };
 
+        // Both fields are the SAME enum (RECOVERY_STATUS) but carry DIFFERENT
+        // information, and getting this wrong has broken install detection
+        // repeatedly. From SWUpdate's GET_STATUS handler (core/network_thread.c):
+        //
+        //   msg.data.status.current     = instp->status;
+        //   msg.data.status.last_result = instp->last_install;
+        //   if (a notification is queued)
+        //       msg.data.status.current = notification->status;  // OVERWRITTEN
+        //
+        // * `current` is the installer's live progress phase, overwritten by
+        //   whatever notification is drained from the queue. In practice it only
+        //   reports non-terminal phases (START / RUN / DOWNLOAD / SUBPROCESS /
+        //   PROGRESS); it does NOT carry the terminal verdict.
+        // * `last_result` is `instp->last_install`, the authoritative terminal
+        //   result: SUCCESS or FAILURE once terminal, IDLE / PROGRESS while
+        //   still running.
+        //
+        // Rules:
+        // * Failure is terminal: report it when `last_result` is FAILURE.
+        // * Success is only trusted once `current` shows the install is actively
+        //   running (RUN) AND `last_result` is SUCCESS, so a stale result from a
+        //   previous install is never mistaken for this one.
         let current = RecoveryStatus::try_from(current_raw).ok();
         let last_result_now = RecoveryStatus::try_from(last_result_raw).ok();
 
-        if current == Some(RecoveryStatus::Failure) {
+        if last_result_now == Some(RecoveryStatus::Failure) {
             return Err(Error::InstallFailed);
         }
 
-        match last_result_now {
-            Some(RecoveryStatus::Failure) => return Err(Error::InstallFailed),
-            Some(RecoveryStatus::Success) if current == Some(RecoveryStatus::Run) => {
-                return Ok(());
-            }
-            _ => {}
+        if current == Some(RecoveryStatus::Run) && last_result_now == Some(RecoveryStatus::Success) {
+            return Ok(());
         }
     }
 }

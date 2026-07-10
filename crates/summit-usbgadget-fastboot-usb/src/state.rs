@@ -28,9 +28,11 @@ impl EventHandler for FastbootUsbState {
         match event {
             Event::Enable => {
                 log::info!("[{udc_name}] fastboot-usb function enabled");
+                self.enabled = true;
             }
             Event::Disable => {
                 log::info!("[{udc_name}] fastboot-usb function disabled");
+                self.enabled = false;
                 self.reset(udc_name, EndpointAction::Cancel, None).await;
             }
             Event::SetupHostToDevice(req) => {
@@ -65,6 +67,7 @@ impl FastbootUsbState {
             downloaded_size: 0,
             fastboot_pending_flash: false,
             finish_pending: false,
+            enabled: false,
         }
     }
 
@@ -206,10 +209,17 @@ impl FastbootUsbState {
                 }
             }
 
-            // Keep exactly one bulk-OUT buffer primed. We never prime a second
-            // one, so once handle_rx_chunk blocks on a full download queue the
-            // host is naturally NAKed until a block drains.
-            if self.rx.is_empty() {
+            // Keep exactly one bulk-OUT buffer primed while the function is
+            // enabled by a connected host. We never prime a second one, so once
+            // handle_rx_chunk blocks on a full download queue the host is
+            // naturally NAKed until a block drains.
+            //
+            // Priming is gated on `enabled` because a read submitted while the
+            // endpoint is disabled (e.g. no USB cable attached) never completes.
+            // On shutdown the AIO context is destroyed, which blocks until every
+            // in-flight request finishes; a never-completing read would hang the
+            // whole (single-threaded) runtime.
+            if self.enabled && self.rx.is_empty() {
                 let buf = self.recv_buffer();
                 if let Err(err) = self.rx.try_recv(buf) {
                     if !crate::functionfs::is_closed_transport_error(&err) {
@@ -220,6 +230,7 @@ impl FastbootUsbState {
 
             let download_active = self.download_active();
             let wait_swupdate = self.finish_pending;
+            let have_rx = !self.rx.is_empty();
 
             tokio::select! {
                 biased;
@@ -260,7 +271,7 @@ impl FastbootUsbState {
                     } else {
                         self.rx.fetch_async().await
                     }
-                }, if !wait_swupdate => {
+                }, if !wait_swupdate && have_rx => {
                     match data_res {
                         Ok(Some(chunk)) => {
                             let empty_completion = chunk.is_empty();
