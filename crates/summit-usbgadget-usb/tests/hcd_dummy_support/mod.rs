@@ -89,6 +89,7 @@ pub(crate) struct TestEnvironment {
 }
 
 impl TestEnvironment {
+    #[allow(unsafe_code)]
     pub(crate) fn new() -> Result<Self, Box<dyn Error>> {
         let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = std::env::temp_dir().join(format!("summit-usbgadget-hcd-dummy-{unique}"));
@@ -109,10 +110,12 @@ impl TestEnvironment {
         let mut new_path = OsString::from(root.as_os_str());
         new_path.push(":");
         new_path.push(previous_path.clone().unwrap_or_default());
-        std::env::set_var("PATH", new_path);
-
         let output_path = root.join("output.bin");
-        std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", &output_path);
+        // SAFETY: test process is single-threaded at this point; no concurrent env access.
+        unsafe {
+            std::env::set_var("PATH", new_path);
+            std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", &output_path);
+        }
 
         Ok(Self {
             root,
@@ -127,7 +130,11 @@ impl TestEnvironment {
         if output_path.exists() {
             fs::remove_file(&output_path)?;
         }
-        std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", &output_path);
+        // SAFETY: test process is single-threaded at this point; no concurrent env access.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", &output_path);
+        }
         Ok(())
     }
 
@@ -140,14 +147,18 @@ impl TestEnvironment {
 }
 
 impl Drop for TestEnvironment {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
-        match &self.previous_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        match &self.previous_output {
-            Some(value) => std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", value),
-            None => std::env::remove_var("SUMMIT_USBGADGET_TEST_OUTPUT"),
+        // SAFETY: test process is single-threaded at this point; no concurrent env access.
+        unsafe {
+            match &self.previous_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.previous_output {
+                Some(value) => std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", value),
+                None => std::env::remove_var("SUMMIT_USBGADGET_TEST_OUTPUT"),
+            }
         }
         let _ = fs::remove_dir_all(&self.root);
     }

@@ -4,7 +4,7 @@
 //! SWUpdate IPC transport (NAND / A-B boot).
 //!
 //! Streams firmware directly into the SWUpdate IPC interface and waits for a
-//! terminal result on the control status channel.
+//! terminal result on the progress notification socket.
 
 use std::io;
 
@@ -49,15 +49,24 @@ pub(super) async fn begin(
         .map_err(|e| io::Error::other(format!("SWUpdate inst_start failed: {e}")))?;
     log::info!("SWUpdate install started; streaming firmware");
 
-    // Data (the InstallConn socket) and completion (a GET_STATUS poll on a
-    // separate control socket) are independent; the status poll is the sole
-    // authority on the result.
+    // Data (the InstallConn socket) and completion (the progress notification
+    // socket) are independent; the progress watcher is the sole authority on the
+    // result. The callback logs progress; the library owns connect/reconnect and
+    // terminal-verdict detection.
     Ok(TransportSpec::new(
         Box::new(conn),
         |params| Box::pin(async move {
-            swu::await_install_result(params.timeout)
-                .await
-                .map_err(|err| normalize_ipc_error(err, "wait"))
+            swu::await_progress_result_with(params.timeout, |msg| {
+                log::debug!(
+                    "SWUpdate progress: step {}/{} {} {}%",
+                    msg.cur_step,
+                    msg.nsteps,
+                    msg.cur_image(),
+                    msg.cur_percent,
+                );
+            })
+            .await
+            .map_err(|err| normalize_ipc_error(err, "wait"))
         }),
     ))
 }

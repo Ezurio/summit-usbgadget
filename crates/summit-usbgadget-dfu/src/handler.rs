@@ -356,10 +356,10 @@ impl Dfu {
     }
 
     async fn poll_download_progress(&mut self) -> io::Result<()> {
-        if let Err(err) = self.flush_pending().await {
-            if self.state != State::Manifest {
-                return Err(io::Error::other(err));
-            }
+        if let Err(err) = self.flush_pending().await
+            && self.state != State::Manifest
+        {
+            return Err(io::Error::other(err));
         }
 
         // A swupdate failure is reported immediately: dfu-util polls GETSTATUS,

@@ -10,8 +10,6 @@ use bytes::Bytes;
 use summit_usbgadget_swupdate::{SwupdateConfigError, SwupdateParams};
 use usb_gadget::function::custom::DfuDesc;
 
-pub const DEFAULT_TRANSFER_SIZE: u16 = 4096;
-
 #[derive(Debug)]
 pub enum DfuConfigError {
     Swupdate(SwupdateConfigError),

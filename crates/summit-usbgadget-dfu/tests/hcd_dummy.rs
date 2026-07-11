@@ -77,8 +77,8 @@ fn run_dfu_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
                     timeout_secs: Some(5),
                 },
                 upload: Some("sysinfo".to_string()),
-                transfer_size: Some(TEST_TRANSFER_SIZE),
-                poll_timeout_ms: Some(10),
+                transfer_size: TEST_TRANSFER_SIZE,
+                poll_timeout_ms: 10,
             })],
         }],
     };
@@ -98,7 +98,8 @@ fn run_dfu_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
     assert_eq!(status.status, DfuStatus::Ok as u8);
     assert_eq!(status.state, DfuState::DfuIdle as u8);
 
-    let expected_upload = sysinfo::SystemInfo::collect(Some(TEST_SERIAL.to_string())).to_bytes();
+    let mut expected_upload = Vec::new();
+    sysinfo::SystemInfo::collect(Some(TEST_SERIAL.to_string())).write_json(&mut expected_upload);
     let mut uploaded = Vec::new();
     let mut block = 0u16;
     loop {
@@ -261,8 +262,8 @@ fn run_dfu_abort_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
                     timeout_secs: Some(5),
                 },
                 upload: Some("sysinfo".to_string()),
-                transfer_size: Some(TEST_TRANSFER_SIZE),
-                poll_timeout_ms: Some(10),
+                transfer_size: TEST_TRANSFER_SIZE,
+                poll_timeout_ms: 10,
             })],
         }],
     };

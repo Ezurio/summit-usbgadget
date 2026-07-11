@@ -16,8 +16,9 @@ pub struct GadgetConfig {
     /// Gadget name in configfs (defaults to the file stem when omitted).
     pub name: Option<String>,
     /// USB device controller selection. Accepts a single controller name, a
-    /// list of names, or the special value `"all"`/`"*"` to bind every
-    /// controller. When omitted, the first available controller is used.
+    /// list of names, the special value `"all"`/`"*"` to bind every controller,
+    /// or `"first"` to bind only the first one. When omitted, every available
+    /// controller is bound (and controllers appearing later are bound too).
     pub udc: Option<UdcSelector>,
     /// Optional Microsoft OS descriptor configuration.
     pub os_descriptor: Option<OsDescriptorConfig>,

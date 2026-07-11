@@ -16,8 +16,8 @@ fn unsupported_dfu_section_is_skipped() {
             ..summit_usbgadget_swupdate::SwupdateConfig::default()
         },
         upload: Some("unsupported".to_string()),
-        transfer_size: None,
-        poll_timeout_ms: None,
+        transfer_size: 4096,
+        poll_timeout_ms: 10,
     };
 
     let result = summit_usbgadget_dfu::gadget::build(&config, "serial");

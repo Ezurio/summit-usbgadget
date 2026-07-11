@@ -13,7 +13,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures_util::Stream;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::time::{sleep, timeout};
@@ -391,28 +390,64 @@ pub async fn progress_connect_with_path(path: impl AsRef<Path>, reconnect: bool)
     progress_connect_path(path.as_ref(), reconnect).await
 }
 
-/// Returns a [`Stream`] of progress frames that reconnects automatically on
-/// disconnect or connect failure when `reconnect` is `true`. When `reconnect`
-/// is `false`, the stream terminates on the first connect error.
+/// Waits for a terminal install verdict on the progress notification socket,
+/// within `timeout`, invoking `on_progress` for every non-terminal frame so the
+/// caller can drive a progress indicator.
 ///
-/// API version compatibility is verified at connect time via the
-/// `progress_connect_ack` handshake; per-frame version checks are not needed.
-pub fn progress_stream(reconnect: bool) -> impl Stream<Item = ProgressMsg> {
-    futures_util::stream::unfold(None::<ProgressConn>, move |mut conn| async move {
+/// This is the progress-socket counterpart of [`await_install_result`], and the
+/// preferred way to observe an install's outcome. The progress socket is a
+/// listen-only broadcast: SWUpdate sends only events that occur AFTER connect
+/// and never replays a stored result (see SWUpdate `core/progress_thread.c`,
+/// `progress_bar_thread`). Every frame therefore belongs to the CURRENT install,
+/// so a stale verdict latched by a previous install can't be misread — none of
+/// the `GET_STATUS` "arming" logic is needed. SWUpdate emits the verdict exactly
+/// once via `swupdate_progress_end()` as a frame whose `status` is SUCCESS or
+/// FAILURE.
+///
+/// If the connection drops before a terminal verdict, it reconnects (via
+/// [`progress_connect`]) and keeps waiting; the socket never replays, so any
+/// terminal event still belongs to the current install.
+///
+/// `on_progress` is synchronous and should stay lightweight and non-blocking
+/// (logging, atomics, channel `try_send`). If you need to `await` per frame,
+/// drive [`progress_connect`] / [`ProgressConn::receive`] directly instead.
+///
+/// Returns `Ok(())` on success, `Err(Error::InstallFailed)` on failure,
+/// `Err(Error::Timeout)` if the deadline elapses, and a connect error (e.g.
+/// `Error::ProgressConnectTimeout`) if the socket cannot be (re)connected within
+/// its retry window.
+pub async fn await_progress_result_with<F>(timeout: Duration, mut on_progress: F) -> Result<()>
+where
+    F: FnMut(&ProgressMsg),
+{
+    let work = async {
+        let mut conn = progress_connect(true).await?;
         loop {
-            if conn.is_none() {
-                match progress_connect(reconnect).await {
-                    Ok(c) => conn = Some(c),
-                    Err(_) => return None,
-                }
-            }
-            match conn.as_mut() {
-                Some(active) => match active.receive().await {
-                    Ok(msg) => return Some((msg, conn)),
-                    Err(_) => conn = None,
+            match conn.receive().await {
+                Ok(msg) => match msg.status().ok() {
+                    Some(crate::RecoveryStatus::Success) => return Ok(()),
+                    Some(crate::RecoveryStatus::Failure) => return Err(Error::InstallFailed),
+                    _ => on_progress(&msg),
                 },
-                None => continue,
+                // Connection dropped before a terminal status: reconnect and keep
+                // waiting. The socket never replays, so any terminal event still
+                // belongs to the current install.
+                Err(_) => conn = progress_connect(true).await?,
             }
         }
-    })
+    };
+
+    match tokio::time::timeout(timeout, work).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::Timeout),
+    }
+}
+
+/// Waits for a terminal install verdict on the progress notification socket,
+/// within `timeout`, discarding intermediate progress frames.
+///
+/// Thin wrapper over [`await_progress_result_with`]; use that variant when you
+/// need progress indication.
+pub async fn await_progress_result(timeout: Duration) -> Result<()> {
+    await_progress_result_with(timeout, |_| {}).await
 }

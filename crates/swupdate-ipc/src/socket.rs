@@ -21,35 +21,30 @@ pub const SOCKET_CTRL_DEFAULT: &str = "sockinstctrl";
 pub const SOCKET_PROGRESS_DEFAULT: &str = "swupdateprog";
 
 fn socket_dir() -> OsString {
-    if let Some(dir) = std::env::var_os("RUNTIME_DIRECTORY") {
-        if !dir.is_empty() {
-            return dir;
-        }
+    if let Some(dir) = std::env::var_os("RUNTIME_DIRECTORY")
+        && !dir.is_empty()
+    {
+        return dir;
     }
-    if let Some(dir) = std::env::var_os("TMPDIR") {
-        if !dir.is_empty() {
-            return dir;
-        }
-    }
-    OsString::from("/tmp")
+    std::env::temp_dir().into_os_string()
 }
 
 /// Resolves the control socket path. Equivalent to the C `get_ctrl_socket()`.
 pub fn ctrl_socket_path() -> PathBuf {
-    if let Some(path) = option_env!("CONFIG_SOCKET_CTRL_PATH") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
+    if let Some(path) = option_env!("CONFIG_SOCKET_CTRL_PATH")
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
     }
     PathBuf::from(socket_dir()).join(SOCKET_CTRL_DEFAULT)
 }
 
 /// Resolves the progress socket path. Equivalent to the C `get_prog_socket()`.
 pub fn progress_socket_path() -> PathBuf {
-    if let Some(path) = option_env!("CONFIG_SOCKET_PROGRESS_PATH") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
+    if let Some(path) = option_env!("CONFIG_SOCKET_PROGRESS_PATH")
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
     }
     PathBuf::from(socket_dir()).join(SOCKET_PROGRESS_DEFAULT)
 }

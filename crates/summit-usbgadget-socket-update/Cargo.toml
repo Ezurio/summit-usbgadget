@@ -10,6 +10,7 @@ license = "LicenseRef-Ezurio-Clause"
 bytes.workspace = true
 log.workspace = true
 openssl = { workspace = true, optional = true }
+openssl-sys = { workspace = true, optional = true }
 serde.workspace = true
 simple_logger.workspace = true
 summit-usbgadget-config.workspace = true
@@ -20,13 +21,10 @@ toml.workspace = true
 
 [features]
 default = ["tls"]
-# TLS on the socket listener via OpenSSL. Disable to drop the openssl /
-# tokio-openssl dependencies entirely (plain TCP only).
-tls = ["dep:openssl", "dep:tokio-openssl"]
+# TLS on the socket listener via OpenSSL. Requires ran OpenSSL 3 build (the FIPS
+# provider API is OpenSSL-3-only). Disable to drop the openssl / tokio-openssl
+# dependencies entirely (plain TCP only).
+tls = ["dep:openssl", "dep:openssl-sys", "dep:tokio-openssl"]
 
 [lib]
 crate-type = ["rlib"]
-
-[lints.rust.unexpected_cfgs]
-level = "warn"
-check-cfg = ["cfg(ossl300)"]

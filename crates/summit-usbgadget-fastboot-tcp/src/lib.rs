@@ -36,37 +36,40 @@ const RECV_BUFFER_SIZE: usize = 128 * 1024;
 /// Serial reported by `getvar:serialno` / sysinfo when none is configured.
 const DEFAULT_SERIAL: &str = "unknown";
 
-/// Default idle timeout (seconds) applied to an established connection.
-const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 30;
-
 /// `[fastboot_tcp]` configuration.
 ///
 /// The SWUpdate parameters are flattened in, matching the USB fastboot-usb function so a
 /// device can offer the same update over both transports with one schema.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct FastbootTcpConfig {
     /// Listen address, e.g. `0.0.0.0:5554` (the fastboot TCP default port).
-    #[serde(default = "default_address")]
     pub address: String,
     /// Optional accept timeout; when unset the listener blocks indefinitely.
     pub accept_timeout_secs: Option<u64>,
     /// Idle timeout (seconds) for an established connection; `0` disables it.
-    /// Defaults to 30 seconds so an idle client cannot hold the single-session
-    /// server open indefinitely.
-    pub inactivity_timeout_secs: Option<u64>,
-    /// Serial number advertised to fastboot hosts. Defaults to `"unknown"`.
-    pub serial: Option<String>,
+    pub inactivity_timeout_secs: u64,
+    /// Serial number advertised to fastboot hosts.
+    pub serial: String,
     /// SWUpdate download parameters shared with the fastboot-usb schema.
     #[serde(flatten)]
     pub swupdate: SwupdateConfig,
 }
 
-impl PluginConfig for FastbootTcpConfig {
-    const SECTION: Option<&'static str> = Some(FASTBOOT_TCP_SECTION);
+impl Default for FastbootTcpConfig {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0:5554".to_string(),
+            accept_timeout_secs: None,
+            inactivity_timeout_secs: 30,
+            serial: DEFAULT_SERIAL.to_string(),
+            swupdate: SwupdateConfig::default(),
+        }
+    }
 }
 
-fn default_address() -> String {
-    "0.0.0.0:5554".to_string()
+impl PluginConfig for FastbootTcpConfig {
+    const SECTION: Option<&'static str> = Some(FASTBOOT_TCP_SECTION);
 }
 
 impl FastbootTcpConfig {
@@ -81,17 +84,9 @@ impl FastbootTcpConfig {
 
     fn inactivity_timeout(&self) -> Option<Duration> {
         match self.inactivity_timeout_secs {
-            Some(0) => None,
-            Some(secs) => Some(Duration::from_secs(secs)),
-            None => Some(Duration::from_secs(DEFAULT_INACTIVITY_TIMEOUT_SECS)),
+            0 => None,
+            secs => Some(Duration::from_secs(secs)),
         }
-    }
-
-    fn serial(&self) -> String {
-        self.serial
-            .clone()
-            .filter(|serial| !serial.is_empty())
-            .unwrap_or_else(|| DEFAULT_SERIAL.to_string())
     }
 }
 
@@ -117,7 +112,7 @@ async fn serve(config: &FastbootTcpConfig, params: SwupdateParams) -> io::Result
     let listener = TcpListener::bind(&config.address).await?;
     log::info!("fastboot-tcp listening on {}", config.address);
 
-    let serial = config.serial();
+    let serial = config.serial.clone();
     let accept_timeout = config.accept_timeout();
     let inactivity_timeout = config.inactivity_timeout();
 

@@ -6,6 +6,7 @@
 
 use bytes::Bytes;
 use serde::Deserialize;
+use std::future::Future;
 use summit_usbgadget_usb::registry::{FunctionBuildContext, GadgetService, RegisteredFunctionConfig};
 use summit_usbgadget_swupdate::sysinfo::SystemInfo;
 use summit_usbgadget_swupdate::SwupdateConfig;
@@ -24,6 +25,7 @@ pub use protocol::{request, GetStatus, State, Status};
 
 /// DFU function configuration as it appears in the main TOML file.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct DfuFnConfig {
 	#[serde(flatten)]
 	pub swupdate: SwupdateConfig,
@@ -31,29 +33,43 @@ pub struct DfuFnConfig {
 	/// device's system information.
 	pub upload: Option<String>,
 	/// Maximum bytes per DFU control-write transaction.
-	pub transfer_size: Option<u16>,
+	pub transfer_size: u16,
 	/// `bwPollTimeout` reported in `DFU_GETSTATUS`, in milliseconds.
-	pub poll_timeout_ms: Option<u32>,
+	pub poll_timeout_ms: u32,
+}
+
+impl Default for DfuFnConfig {
+	fn default() -> Self {
+		Self {
+			swupdate: SwupdateConfig::default(),
+			upload: None,
+			transfer_size: 4096,
+			poll_timeout_ms: 10,
+		}
+	}
 }
 
 impl DfuFnConfig {
 	/// Converts the parsed configuration into the runtime [`DfuConfig`].
 	pub fn to_config(&self, serial: &str) -> Result<DfuConfig, DfuConfigError> {
-		let transfer_size = self.transfer_size.unwrap_or(config::DEFAULT_TRANSFER_SIZE);
-		let poll_timeout_ms = self.poll_timeout_ms.unwrap_or(10);
-
 		let upload = match self.upload.as_deref() {
 			None => None,
 			Some("sysinfo") => {
-				let info = SystemInfo::collect(Some(serial.to_string()));
-				Some(UploadSource::Data(Bytes::from(info.to_bytes())))
+				let mut json = Vec::new();
+				SystemInfo::collect(Some(serial.to_string())).write_json(&mut json);
+				Some(UploadSource::Data(Bytes::from(json)))
 			}
 			Some(other) => return Err(DfuConfigError::UnsupportedUploadTarget(other.to_string())),
 		};
 
 		let download = self.swupdate.to_params()?;
 
-		Ok(DfuConfig { download, upload, transfer_size, poll_timeout_ms })
+		Ok(DfuConfig {
+			download,
+			upload,
+			transfer_size: self.transfer_size,
+			poll_timeout_ms: self.poll_timeout_ms,
+		})
 	}
 }
 
@@ -89,7 +105,7 @@ impl RegisteredFunctionConfig for DfuFnConfig {
 struct DfuService(DfuRuntime);
 
 impl GadgetService for DfuService {
-	fn spawn(self: Box<Self>, udc_name: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+	fn spawn(self: Box<Self>, udc_name: String) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
 		let runtime = self.0;
 		Box::pin(async move { serve(udc_name, runtime).await })
 	}

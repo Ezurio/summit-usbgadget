@@ -389,6 +389,60 @@ pub fn progress_connect_with_path(path: impl AsRef<Path>, reconnect: bool) -> Re
     progress_connect_path(path.as_ref(), reconnect)
 }
 
+/// Waits for a terminal install verdict on the progress notification socket,
+/// within `timeout`, invoking `on_progress` for every non-terminal frame so the
+/// caller can drive a progress indicator.
+///
+/// This is the progress-socket counterpart of [`await_install_result`], and the
+/// preferred way to observe an install's outcome. The progress socket is a
+/// listen-only broadcast: SWUpdate sends only events that occur AFTER connect
+/// and never replays a stored result (see SWUpdate `core/progress_thread.c`,
+/// `progress_bar_thread`). Every frame therefore belongs to the CURRENT install,
+/// so a stale verdict latched by a previous install can't be misread — none of
+/// the `GET_STATUS` "arming" logic is needed. SWUpdate emits the verdict exactly
+/// once via `swupdate_progress_end()` as a frame whose `status` is SUCCESS or
+/// FAILURE.
+///
+/// Returns `Ok(())` on success, `Err(Error::InstallFailed)` on failure,
+/// `Err(Error::Timeout)` if the deadline elapses, and `Err(Error::Closed)` if
+/// the progress socket ends before a terminal verdict (i.e. it could not be
+/// reconnected within its retry window).
+pub fn await_progress_result_with<F>(timeout: Duration, mut on_progress: F) -> Result<()>
+where
+    F: FnMut(&ProgressMsg),
+{
+    let deadline = Instant::now() + timeout;
+    let mut conn = progress_connect(true)?;
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err(Error::Timeout);
+        }
+
+        match conn.receive_nb() {
+            Ok(Some(msg)) => match msg.status().ok() {
+                Some(RecoveryStatus::Success) => return Ok(()),
+                Some(RecoveryStatus::Failure) => return Err(Error::InstallFailed),
+                _ => on_progress(&msg),
+            },
+            Ok(None) => thread::sleep(STATUS_POLL_INTERVAL),
+            // Connection dropped before a terminal status: reconnect and keep
+            // waiting. The socket never replays, so any terminal event still
+            // belongs to the current install.
+            Err(_) => conn = progress_connect(true)?,
+        }
+    }
+}
+
+/// Waits for a terminal install verdict on the progress notification socket,
+/// within `timeout`, discarding intermediate progress frames.
+///
+/// Thin wrapper over [`await_progress_result_with`]; use that variant when you
+/// need progress indication.
+pub fn await_progress_result(timeout: Duration) -> Result<()> {
+    await_progress_result_with(timeout, |_| {})
+}
+
 /// Outcome of an asynchronous install driven by [`async_start`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsyncOutcome {

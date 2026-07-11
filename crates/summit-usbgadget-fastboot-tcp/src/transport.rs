@@ -8,6 +8,7 @@
 //! fastboot packet — commands, replies, and bulk download data — is framed as an
 //! 8-byte big-endian length prefix followed by that many bytes.
 
+use std::future::Future;
 use std::io::{self, ErrorKind};
 use std::time::Duration;
 
@@ -35,7 +36,7 @@ pub(crate) struct FastbootFraming<S> {
 /// lapse into a `TimedOut` error so the session drops the idle connection.
 async fn read_guard<F, T>(inactivity_timeout: Option<Duration>, fut: F) -> io::Result<T>
 where
-    F: std::future::Future<Output = io::Result<T>>,
+    F: Future<Output = io::Result<T>>,
 {
     match inactivity_timeout {
         Some(limit) => timeout(limit, fut)
@@ -82,6 +83,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> FastbootFraming<S> {
     pub(crate) async fn send_packet(&mut self, data: &[u8]) -> io::Result<()> {
         self.stream.write_all(&(data.len() as u64).to_be_bytes()).await?;
         self.stream.write_all(data).await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
+
+    /// Writes an already-framed packet — its 8-byte length prefix included — in a
+    /// single write. For callers that build the frame themselves (e.g. to
+    /// serialize a payload straight into it) so the length prefix and body go out
+    /// in one go without an extra copy.
+    pub(crate) async fn send_prebuilt(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.stream.write_all(frame).await?;
         self.stream.flush().await?;
         Ok(())
     }

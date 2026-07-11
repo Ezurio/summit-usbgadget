@@ -8,10 +8,9 @@ license = "LicenseRef-Ezurio-Clause"
 
 [features]
 # Async (tokio) client API. The blocking (std) API is always available.
-async = ["dep:tokio", "dep:futures-util"]
+async = ["dep:tokio"]
 
 [dependencies]
-futures-util = { workspace = true, optional = true }
 thiserror = "2"
 tokio = { workspace = true, optional = true }
 

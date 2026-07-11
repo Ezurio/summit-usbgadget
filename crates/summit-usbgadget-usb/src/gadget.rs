@@ -146,9 +146,25 @@ impl RunningGadget {
 }
 
 /// Removes any previously defined gadgets. Call once before binding.
-pub fn reset() -> Result<(), Box<dyn Error>> {
-    remove_all()?;
-    Ok(())
+///
+/// The gadget configfs hierarchy only exists once configfs is mounted and
+/// `libcomposite` is loaded — which normally happens as a UDC appears. Before
+/// that there is simply nothing to reset, so a missing configfs/`usb_gadget`
+/// directory is not an error: the service starts quietly and the udev monitor
+/// binds the gadget when the controller shows up. Only propagate other failures.
+///
+/// `remove_all` performs synchronous configfs I/O, so it runs on a
+/// blocking-pool thread (see [`bind_one`]) instead of the shared async runtime.
+pub async fn reset() -> Result<(), Box<dyn Error>> {
+    match tokio::task::spawn_blocking(remove_all).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) if err.kind() == io::ErrorKind::NotFound => {
+            log::debug!("no existing gadgets to reset ({err}); waiting for a UDC via udev");
+            Ok(())
+        }
+        Ok(Err(err)) => Err(err.into()),
+        Err(join_err) => Err(format!("gadget reset task panicked: {join_err}").into()),
+    }
 }
 
 /// Builds the gadget described by `cfg`, registers it, and binds it to the
@@ -467,7 +483,7 @@ pub async fn run(config_path: impl AsRef<Path>, shutdown: Shutdown) -> Result<()
     let config = match GadgetConfig::load(config_path) {
         Ok(config) => config,
         Err(err) => {
-            if let Err(reset_err) = reset() {
+            if let Err(reset_err) = reset().await {
                 log::warn!("failed to remove gadgets after configuration load error: {reset_err}");
             }
             return Err(err.into());
@@ -483,7 +499,7 @@ pub async fn serve_until<F>(config: GadgetConfig, shutdown: F) -> Result<(), Box
 where
     F: Future<Output = ()>,
 {
-    reset()?;
+    reset().await?;
 
     let selection = Selection::from_config(&config.udc);
     log::info!("controller selection: {selection:?}");
@@ -496,7 +512,7 @@ where
     let mut gadgets: Vec<RunningGadget> = Vec::new();
     let mut bound: HashSet<OsString> = HashSet::new();
 
-    bind_existing(&config, &selection, &mut bound, &mut gadgets);
+    bind_existing(&config, &selection, &mut bound, &mut gadgets).await;
 
     if !selection.wants_more(&bound) {
         log::info!("all selected controllers are bound");
@@ -525,7 +541,7 @@ where
                 let Some(name) = udc_name_from_event(&event) else {
                     continue;
                 };
-                bind_one(&config, &selection, &mut bound, &mut gadgets, name);
+                bind_one(&config, &selection, &mut bound, &mut gadgets, name).await;
             }
         }
     }
@@ -541,14 +557,14 @@ async fn shutdown_all(gadgets: Vec<RunningGadget>) {
     }
 }
 
-fn bind_existing(
+async fn bind_existing(
     config: &GadgetConfig,
     selection: &Selection,
     bound: &mut HashSet<OsString>,
     gadgets: &mut Vec<RunningGadget>,
 ) {
     for name in udc::existing() {
-        bind_one(config, selection, bound, gadgets, name);
+        bind_one(config, selection, bound, gadgets, name).await;
     }
 }
 
@@ -561,7 +577,14 @@ fn udc_name_from_event(event: &tokio_udev::Event) -> Option<OsString> {
 }
 
 /// Builds and binds a gadget on controller `name` if the selection allows it.
-fn bind_one(
+///
+/// Building and binding a gadget performs many synchronous configfs reads and
+/// writes (and can block waiting on the kernel). The whole process runs on a
+/// blocking-pool thread via [`tokio::task::spawn_blocking`] so it never stalls
+/// the async runtime — this service shares a single-threaded runtime with
+/// every other plugin (e.g. fastboot-over-TCP), and a blocking call made
+/// directly from a polled future would freeze all of them for its duration.
+async fn bind_one(
     config: &GadgetConfig,
     selection: &Selection,
     bound: &mut HashSet<OsString>,
@@ -571,11 +594,25 @@ fn bind_one(
     if !selection.wants(&name, bound) {
         return;
     }
-    let Some(udc) = udc::by_name(&name) else {
-        return;
+
+    let config = config.clone();
+    let build_name = name.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let udc = udc::by_name(&build_name)?;
+        Some(build_on_udc(&config, &udc).map_err(|err| err.to_string()))
+    })
+    .await;
+
+    let build_result = match result {
+        Ok(Some(result)) => result,
+        Ok(None) => return,
+        Err(join_err) => {
+            log::error!("gadget build task for UDC {} panicked: {join_err}", name.to_string_lossy());
+            return;
+        }
     };
 
-    match build_on_udc(config, &udc) {
+    match build_result {
         Ok(running) => {
             #[allow(unused_mut)]
             let mut running = running;
@@ -589,3 +626,4 @@ fn bind_one(
         Err(err) => log::error!("failed to bind gadget on UDC {}: {err}", name.to_string_lossy()),
     }
 }
+

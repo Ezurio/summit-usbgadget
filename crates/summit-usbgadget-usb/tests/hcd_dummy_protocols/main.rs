@@ -106,8 +106,8 @@ fn run_dfu_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
                     timeout_secs: Some(5),
                 },
                 upload: Some("sysinfo".to_string()),
-                transfer_size: Some(TEST_TRANSFER_SIZE),
-                poll_timeout_ms: Some(10),
+                transfer_size: TEST_TRANSFER_SIZE,
+                poll_timeout_ms: 10,
             })],
         }],
     };
@@ -127,7 +127,8 @@ fn run_dfu_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
     assert_eq!(status.status, DfuStatus::Ok as u8);
     assert_eq!(status.state, DfuState::DfuIdle as u8);
 
-    let expected_upload = sysinfo::SystemInfo::collect(Some(TEST_SERIAL.to_string())).to_bytes();
+    let mut expected_upload = Vec::new();
+    sysinfo::SystemInfo::collect(Some(TEST_SERIAL.to_string())).write_json(&mut expected_upload);
     let mut uploaded = Vec::new();
     let mut block = 0u16;
     loop {
@@ -223,7 +224,8 @@ fn run_fbk_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
     writer.flush()?;
     assert_eq!(read_exact(&mut reader, 4 + TEST_SERIAL.len())?, format!("OKAY{TEST_SERIAL}").into_bytes());
 
-    let expected_json = sysinfo::SystemInfo::collect(Some(TEST_SERIAL.to_string())).to_json_bytes();
+    let mut expected_json = Vec::new();
+    sysinfo::SystemInfo::collect(Some(TEST_SERIAL.to_string())).write_json(&mut expected_json);
     writer.write_all(b"fetch:sysinfo.json")?;
     writer.flush()?;
     let header = read_exact(&mut reader, 12)?;
@@ -305,8 +307,8 @@ fn run_dfu_abort_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
                     timeout_secs: Some(5),
                 },
                 upload: Some("sysinfo".to_string()),
-                transfer_size: Some(TEST_TRANSFER_SIZE),
-                poll_timeout_ms: Some(10),
+                transfer_size: TEST_TRANSFER_SIZE,
+                poll_timeout_ms: 10,
             })],
         }],
     };
@@ -489,6 +491,7 @@ struct TestEnvironment {
 }
 
 impl TestEnvironment {
+    #[allow(unsafe_code)]
     fn new() -> Result<Self, Box<dyn Error>> {
         let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = std::env::temp_dir().join(format!("summit-usbgadget-hcd-dummy-{unique}"));
@@ -509,10 +512,12 @@ impl TestEnvironment {
         let mut new_path = OsString::from(root.as_os_str());
         new_path.push(":");
         new_path.push(previous_path.clone().unwrap_or_default());
-        std::env::set_var("PATH", new_path);
-
         let output_path = root.join("output.bin");
-        std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", &output_path);
+        // SAFETY: test process is single-threaded at this point; no concurrent env access.
+        unsafe {
+            std::env::set_var("PATH", new_path);
+            std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", &output_path);
+        }
 
         Ok(Self {
             root,
@@ -527,7 +532,11 @@ impl TestEnvironment {
         if output_path.exists() {
             fs::remove_file(&output_path)?;
         }
-        std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", &output_path);
+        // SAFETY: test process is single-threaded at this point; no concurrent env access.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", &output_path);
+        }
         Ok(())
     }
 
@@ -540,14 +549,18 @@ impl TestEnvironment {
 }
 
 impl Drop for TestEnvironment {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
-        match &self.previous_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        match &self.previous_output {
-            Some(value) => std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", value),
-            None => std::env::remove_var("SUMMIT_USBGADGET_TEST_OUTPUT"),
+        // SAFETY: test process is single-threaded at this point; no concurrent env access.
+        unsafe {
+            match &self.previous_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.previous_output {
+                Some(value) => std::env::set_var("SUMMIT_USBGADGET_TEST_OUTPUT", value),
+                None => std::env::remove_var("SUMMIT_USBGADGET_TEST_OUTPUT"),
+            }
         }
         let _ = fs::remove_dir_all(&self.root);
     }

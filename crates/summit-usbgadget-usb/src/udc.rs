@@ -3,16 +3,22 @@
 //
 //! USB device controller (UDC) discovery via udev.
 //!
-//! Existing controllers are enumerated through the `usb-gadget` crate, and new
-//! controllers are discovered by listening to udev events on the `udc`
-//! subsystem (no polling). The set of controllers to bind is chosen from the
-//! configuration's [`UdcSelector`].
+//! Discovery is entirely udev-driven: the service starts, registers a udev
+//! monitor on the `udc` subsystem, and then queries the controllers already
+//! attached with a udev [`Enumerator`] over the same subsystem. Controllers
+//! that appear later are delivered as monitor events, so no polling is needed
+//! and the initial scan and the live stream share one source of truth. The set
+//! of controllers to bind is chosen from the configuration's [`UdcSelector`].
+//!
+//! A discovered controller is resolved to a [`usb_gadget::Udc`] only when it is
+//! actually bound; that object is the configfs bind backend, not part of
+//! discovery.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io;
 
-use tokio_udev::{AsyncMonitorSocket, MonitorBuilder};
+use tokio_udev::{AsyncMonitorSocket, Enumerator, MonitorBuilder};
 use usb_gadget::{udcs, Udc};
 
 use crate::config::UdcSelector;
@@ -33,12 +39,18 @@ pub enum Selection {
 
 impl Selection {
     /// Derives the selection from the configured [`UdcSelector`].
+    ///
+    /// When `udc` is omitted the default is [`Selection::All`]: every attached
+    /// controller is bound and controllers that appear later are bound as they
+    /// arrive. Use `udc = "first"` to bind only the first controller instead.
     pub fn from_config(selector: &Option<UdcSelector>) -> Self {
         match selector {
-            None => Selection::First,
+            None => Selection::All,
             Some(UdcSelector::One(s)) if is_all(s) => Selection::All,
+            Some(UdcSelector::One(s)) if is_first(s) => Selection::First,
             Some(UdcSelector::One(s)) => Selection::Named(HashSet::from([s.clone()])),
             Some(UdcSelector::Many(v)) if v.iter().any(|s| is_all(s)) => Selection::All,
+            Some(UdcSelector::Many(v)) if v.iter().any(|s| is_first(s)) => Selection::First,
             Some(UdcSelector::Many(v)) => Selection::Named(v.iter().cloned().collect()),
         }
     }
@@ -71,13 +83,33 @@ fn is_all(s: &str) -> bool {
     s.eq_ignore_ascii_case("all") || s == "*"
 }
 
-/// Returns the names of the controllers currently present, sorted for
-/// deterministic ordering.
+fn is_first(s: &str) -> bool {
+    s.eq_ignore_ascii_case("first")
+}
+
+/// Returns the names of the controllers currently attached, discovered through
+/// udev and sorted for deterministic ordering.
+///
+/// Enumeration failures are logged and treated as "none attached yet": the
+/// service then relies purely on the udev monitor to deliver controllers as
+/// they appear.
 pub fn existing() -> Vec<OsString> {
-    let mut names: Vec<OsString> =
-        udcs().map(|list| list.into_iter().map(|u| u.name().to_os_string()).collect()).unwrap_or_default();
+    let mut names = match enumerate() {
+        Ok(names) => names,
+        Err(err) => {
+            log::warn!("udev enumeration of {SUBSYSTEM} controllers failed: {err}");
+            Vec::new()
+        }
+    };
     names.sort();
     names
+}
+
+/// Queries udev for every device currently attached to the `udc` subsystem.
+fn enumerate() -> io::Result<Vec<OsString>> {
+    let mut enumerator = Enumerator::new()?;
+    enumerator.match_subsystem(SUBSYSTEM)?;
+    Ok(enumerator.scan_devices()?.map(|device| device.sysname().to_os_string()).collect())
 }
 
 /// Resolves a controller name to a [`Udc`].

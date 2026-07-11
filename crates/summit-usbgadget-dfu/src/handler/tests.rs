@@ -7,7 +7,7 @@ use usb_gadget::function::custom::CtrlReq;
 
 use summit_usbgadget_swupdate::SwupdateParams;
 
-use crate::config::{DEFAULT_TRANSFER_SIZE, DfuConfig};
+use crate::config::DfuConfig;
 use crate::protocol::{request, State, Status};
 
 use super::{DFU_SUFFIX_LEN, Dfu, flushable_len, has_valid_dfu_suffix};
@@ -16,7 +16,7 @@ fn test_config() -> DfuConfig {
     DfuConfig {
         download: SwupdateParams::default(),
         upload: None,
-        transfer_size: DEFAULT_TRANSFER_SIZE,
+        transfer_size: 4096,
         poll_timeout_ms: 10,
     }
 }

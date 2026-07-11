@@ -19,6 +19,7 @@
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
@@ -129,14 +130,30 @@ macro_rules! declare_service {
 }
 
 /// Starts every registered [`Service`] and runs them for the lifetime of the
-/// process, returning once all have shut down or the first one fails.
+/// process.
+///
+/// Services are independent: one failing (for example the USB gadget when no
+/// controller or configfs is available) must not cancel the others (for example
+/// the fastboot-over-TCP updater, which needs no USB at all). Each service is
+/// therefore run to completion on its own, its error is logged, and the
+/// remaining services keep running. The process returns an error only once every
+/// service has stopped and at least one of them failed.
 pub async fn run_services(config_path: PathBuf) -> Result<(), Box<dyn Error>> {
     let shutdown = Shutdown::from_signals();
-    let futures: Vec<ServiceFuture> = inventory::iter::<Service>
+    let futures: Vec<_> = inventory::iter::<Service>
         .into_iter()
         .map(|service| {
             log::info!("starting {} service", service.name);
-            (service.run)(config_path.clone(), shutdown.clone())
+            let future = (service.run)(config_path.clone(), shutdown.clone());
+            async move {
+                match future.await {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        log::error!("{} service failed: {err}", service.name);
+                        Err(err)
+                    }
+                }
+            }
         })
         .collect();
 
@@ -145,9 +162,22 @@ pub async fn run_services(config_path: PathBuf) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    futures_util::future::try_join_all(futures).await.map(|_| ())
-}
+    // Wait for every service regardless of individual failures so that one
+    // service's error never cancels the others still doing useful work.
+    let mut first_error: Option<Box<dyn Error>> = None;
+    for result in futures_util::future::join_all(futures).await {
+        if let Err(err) = result
+            && first_error.is_none()
+        {
+            first_error = Some(err);
+        }
+    }
 
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
 
 /// A loaded configuration document.
 ///
@@ -251,7 +281,7 @@ pub trait PluginConfig: DeserializeOwned + Sized {
 #[derive(Debug)]
 pub enum ConfigError {
     /// The configuration file could not be read.
-    Io(std::io::Error),
+    Io(io::Error),
     /// The TOML could not be parsed.
     Toml(toml::de::Error),
     /// The root document shape is invalid.
@@ -273,8 +303,8 @@ impl fmt::Display for ConfigError {
 
 impl Error for ConfigError {}
 
-impl From<std::io::Error> for ConfigError {
-    fn from(e: std::io::Error) -> Self {
+impl From<io::Error> for ConfigError {
+    fn from(e: io::Error) -> Self {
         ConfigError::Io(e)
     }
 }

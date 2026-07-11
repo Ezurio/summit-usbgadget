@@ -219,10 +219,9 @@ pub fn fastboot_getvar_reply(cmd: &[u8], serial: &str) -> Option<Vec<u8>> {
             Some(b"OKAY400000000".to_vec())
         }
         cmd if matches!(command_arg(cmd, b"getvar:partition-size:"), Some(b"sysinfo" | b"sysinfo.json")) => {
-            let size = SystemInfo::collect(Some(serial.to_owned()))
-                .to_json_bytes()
-                .len();
-            Some(format!("OKAY{size:08X}").into_bytes())
+            let mut json = Vec::new();
+            SystemInfo::collect(Some(serial.to_owned())).write_json(&mut json);
+            Some(format!("OKAY{:08X}", json.len()).into_bytes())
         }
         _ => None,
     }

@@ -18,6 +18,7 @@ default = []
 futures-util.workspace = true
 inventory.workspace = true
 log.workspace = true
+rustix.workspace = true
 serde.workspace = true
 simple_logger.workspace = true
 summit-usbgadget-config.workspace = true

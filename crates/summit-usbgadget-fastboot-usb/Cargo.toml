@@ -10,7 +10,6 @@ license.workspace = true
 [dependencies]
 bytes.workspace = true
 log.workspace = true
-rustix.workspace = true
 serde.workspace = true
 summit-usbgadget-fastboot-proto.workspace = true
 summit-usbgadget-swupdate.workspace = true

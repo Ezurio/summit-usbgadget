@@ -5,11 +5,13 @@
 //! Minimal fastboot-usb-compatible custom function.
 
 mod commands;
-mod functionfs;
 mod state;
 
+use std::io;
+use std::future::Future;
 use std::time::Duration;
 
+use bytes::Bytes;
 use serde::Deserialize;
 use summit_usbgadget_swupdate::{SwupdateConfig, SwupdateConfigError, SwupdateParams, SwupdateSession};
 use summit_usbgadget_usb::registry::{FunctionBuildContext, GadgetService, RegisteredFunctionConfig};
@@ -19,7 +21,8 @@ use usb_gadget::function::custom::{
 use usb_gadget::function::Handle;
 use usb_gadget::Class;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct FastbootUsbFnConfig {
     #[serde(flatten)]
     pub swupdate: SwupdateConfig,
@@ -34,7 +37,7 @@ impl FastbootUsbFnConfig {
 struct FastbootUsbService(FastbootUsbRuntime);
 
 impl GadgetService for FastbootUsbService {
-    fn spawn(self: Box<Self>, udc_name: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    fn spawn(self: Box<Self>, udc_name: String) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
         let runtime = self.0;
         Box::pin(async move { serve(udc_name, runtime).await })
     }
@@ -92,17 +95,19 @@ pub struct FastbootUsbRuntime {
     tx: EndpointSender,
     download: SwupdateParams,
     serial: String,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum EndpointAction {
-    Cancel,
-    Halt,
+    /// Fallback used only if the real descriptor query in `serve_connected`
+    /// fails; mirrors the max packet size the RX endpoint was actually built
+    /// with (`usb_gadget::function::custom::Endpoint::bulk`'s default), so
+    /// there is exactly one place this number is defined.
+    rx_max_packet_size_default: usize,
 }
 
 #[derive(Debug)]
 struct FastbootUsbState {
     rx_max_packet_size: usize,
+    /// Fallback used only if the real descriptor query in `serve_connected`
+    /// fails; see `FastbootUsbRuntime::rx_max_packet_size_default`.
+    rx_max_packet_size_default: usize,
     rx: EndpointReceiver,
     tx: EndpointSender,
     download_params: SwupdateParams,
@@ -113,10 +118,6 @@ struct FastbootUsbState {
     downloaded_size: usize,
     fastboot_pending_flash: bool,
     finish_pending: bool,
-    /// Whether the function is currently enabled by a connected host. While
-    /// disabled (e.g. no USB cable attached) no bulk-OUT read is primed, so the
-    /// kernel AIO context has nothing in flight and teardown cannot block.
-    enabled: bool,
 }
 
 pub fn build(cfg: &FastbootUsbFnConfig, serial: &str) -> Result<(Handle, FastbootUsbRuntime), SwupdateConfigError> {
@@ -124,16 +125,31 @@ pub fn build(cfg: &FastbootUsbFnConfig, serial: &str) -> Result<(Handle, Fastboo
     let (rx, rx_dir) = EndpointDirection::host_to_device();
     let (tx, tx_dir) = EndpointDirection::device_to_host();
 
+    // The endpoint builder is the one place this default is configured; read
+    // it back instead of duplicating the literal as a separate fallback.
+    let rx_endpoint = Endpoint::bulk(rx_dir.with_queue_len(RECV_QUEUE_DEPTH as u32));
+    let rx_max_packet_size_default = rx_endpoint.max_packet_size_hs as usize;
+
     let (custom, handle) = Custom::builder()
         .with_interface(
             Interface::new(Class::new(0xff, 0x42, 0x03), "fastboot-usb")
-                .with_endpoint(Endpoint::bulk(rx_dir.with_queue_len(RECV_QUEUE_DEPTH as u32)))
+                .with_endpoint(rx_endpoint)
                 .with_endpoint(Endpoint::bulk(tx_dir))
                 .with_os_ext_compat(OsExtCompat::winusb()),
         )
         .build();
 
-    Ok((handle, FastbootUsbRuntime { custom, rx, tx, download, serial: serial.to_owned() }))
+    Ok((
+        handle,
+        FastbootUsbRuntime {
+            custom,
+            rx,
+            tx,
+            download,
+            serial: serial.to_owned(),
+            rx_max_packet_size_default,
+        },
+    ))
 }
 
 /// Builds one fastboot-usb function, storing its runtime when supported and skipping
@@ -159,15 +175,38 @@ pub fn build_fastboot_usb(
     Ok(Some(handle))
 }
 
-pub async fn serve(udc_name: String, mut runtime: FastbootUsbRuntime) {
-    log::info!("[{udc_name}] servicing fastboot-usb upload function");
+/// Writes a fixed reply token onto the fastboot-usb bulk IN endpoint.
+pub(crate) async fn send_static(tx: &mut EndpointSender, data: &'static [u8]) -> io::Result<()> {
+    tx.send_async(Bytes::from_static(data)).await
+}
 
+pub async fn serve(udc_name: String, mut runtime: FastbootUsbRuntime) {
     let mut state = FastbootUsbState::new(
         runtime.rx,
         runtime.tx,
         runtime.download,
         runtime.serial,
+        runtime.rx_max_packet_size_default,
     );
 
-    state.run(&udc_name, &mut runtime.custom).await;
+    // Split the function into two independent async planes that communicate only
+    // through `enabled`: the generic endpoint-zero control loop
+    // (`summit_usbgadget_usb::functionfs::serve`, shared with DFU) drives a
+    // fastboot-specific `FastbootControl` callback that publishes the host's
+    // configured state, and the bulk data loop observes it and reacts in its own
+    // iteration. Neither blocks the other, and the data loop never touches a USB
+    // endpoint until the control loop reports the function enabled. When either
+    // loop ends (gadget unbound), the other is dropped with it.
+    let (enabled_tx, enabled_rx) = tokio::sync::watch::channel(false);
+    let mut control = state::FastbootControl::new(enabled_tx);
+
+    tokio::select! {
+        _ = summit_usbgadget_usb::functionfs::serve(
+            udc_name.clone(),
+            "fastboot-usb upload function",
+            &mut runtime.custom,
+            &mut control,
+        ) => {}
+        _ = state.data_loop(&udc_name, enabled_rx) => {}
+    }
 }

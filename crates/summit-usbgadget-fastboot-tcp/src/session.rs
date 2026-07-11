@@ -12,13 +12,14 @@
 
 use std::io::{self, ErrorKind};
 
+use bytes::BytesMut;
 use summit_usbgadget_fastboot_proto::{
     data_header, fastboot_getvar_reply, parse_command, DownloadKind, FetchTarget, FlashTarget,
     ParsedCommand, FAIL_CLOSE, FAIL_CMD, FAIL_EPIPE, FAIL_FLASH, FAIL_OPEN, FAIL_UNKNOWN_PART,
     INFO_WAIT_SWUPDATE, OKAY,
 };
 use summit_usbgadget_swupdate::sysinfo::SystemInfo;
-use summit_usbgadget_swupdate::{Feed, SwupdateParams, SwupdateSession};
+use summit_usbgadget_swupdate::{pump_to_swupdate, NextSwupdateBlock, PumpToSwupdateEnd, SwupdateParams, SwupdatePumpSource, SwupdateSession};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::transport::FastbootFraming;
@@ -35,7 +36,7 @@ pub(crate) struct TcpFastbootSession<S> {
     fastboot_pending_flash: bool,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> TcpFastbootSession<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> TcpFastbootSession<S> {
     pub(crate) fn new(
         transport: FastbootFraming<S>,
         params: SwupdateParams,
@@ -121,19 +122,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TcpFastbootSession<S> {
             FetchTarget::Sysinfo => "sysinfo",
             FetchTarget::SysinfoJson => "sysinfo.json",
         };
-        let payload = SystemInfo::collect(Some(self.serial.clone())).to_json_bytes();
-        log::info!("fastboot-tcp {}: fetch {label} ({} bytes)", self.peer, payload.len());
-        self.transport.send_packet(data_header(payload.len()).as_bytes()).await?;
-        self.transport.send_packet(&payload).await?;
+        // Serialize the JSON straight into its data-phase frame, after an 8-byte
+        // length-prefix placeholder, then backfill the prefix and send the whole
+        // frame in one write — no intermediate payload buffer, no split writes.
+        let mut frame = vec![0u8; 8];
+        SystemInfo::collect(Some(self.serial.clone())).write_json(&mut frame);
+        let len = frame.len() - 8;
+        frame[..8].copy_from_slice(&(len as u64).to_be_bytes());
+        log::info!("fastboot-tcp {}: fetch {label} ({len} bytes)", self.peer);
+        self.transport.send_packet(data_header(len).as_bytes()).await?;
+        self.transport.send_prebuilt(&frame).await?;
         self.transport.send_packet(OKAY).await
     }
 
     async fn handle_download(&mut self, len: usize, kind: DownloadKind) -> io::Result<()> {
-        if !self.sink.is_open() {
-            if let Err(err) = self.sink.open().await {
-                log::error!("fastboot-tcp {}: download begin failed: {err}", self.peer);
-                return self.transport.send_packet(FAIL_OPEN).await;
-            }
+        if !self.sink.is_open()
+            && let Err(err) = self.sink.open().await
+        {
+            log::error!("fastboot-tcp {}: download begin failed: {err}", self.peer);
+            return self.transport.send_packet(FAIL_OPEN).await;
         }
 
         self.transport.send_packet(data_header(len).as_bytes()).await?;
@@ -153,44 +160,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TcpFastbootSession<S> {
     /// Reads exactly `total` payload bytes across one or more data-phase frames,
     /// feeding them into SWUpdate, then acknowledges the completed data phase.
     async fn stream_download(&mut self, total: usize) -> io::Result<()> {
-        let mut remaining = total;
+        let mut source = FastbootDownloadSource::new(&mut self.transport, total);
         let mut forwarding = true;
 
-        while remaining > 0 {
-            let Some(frame_len) = self.transport.read_header().await? else {
-                self.sink.abort().await;
-                return Err(io::Error::new(ErrorKind::UnexpectedEof, "connection closed mid-download"));
-            };
-            let mut frame_remaining = frame_len as usize;
+        while source.remaining > 0 {
+            if !forwarding {
+                let _ = source.read_block(&mut self.sink).await?;
+                continue;
+            }
 
-            while frame_remaining > 0 && remaining > 0 {
-                let want = frame_remaining.min(remaining).min(RECV_BUFFER_SIZE);
-                let mut buf = self.sink.buffer(want);
-                buf.resize(want, 0);
-                let read = self.transport.read_into(&mut buf).await?;
-                if read == 0 {
-                    self.sink.abort().await;
-                    return Err(io::Error::new(ErrorKind::UnexpectedEof, "connection closed mid-download"));
-                }
-                buf.truncate(read);
-                frame_remaining -= read;
-                remaining -= read;
+            let pump_end = pump_to_swupdate(&mut self.sink, &mut source).await?;
 
-                // A swupdate failure aborts the whole session immediately so the
-                // client sees the error rather than a false OKAY.
-                if self.sink.is_open() {
-                    if let Some(Err(err)) = self.sink.try_finished() {
-                        log::error!("fastboot-tcp {}: swupdate failed during download: {err}", self.peer);
-                        let _ = self.transport.send_packet(FAIL_EPIPE).await;
-                        self.sink.abort().await;
-                        return Err(err);
-                    }
-                }
-
-                if forwarding && matches!(self.sink.send(buf).await?, Feed::Closed) {
-                    // swupdate already finished/failed; keep draining the client
+            match pump_end {
+                PumpToSwupdateEnd::InputClosed => break,
+                PumpToSwupdateEnd::SwupdateFinished(Ok(())) => {
+                    // swupdate already finished; keep draining the client
                     // (uploaders send the whole image) but discard the bytes.
                     forwarding = false;
+                }
+                PumpToSwupdateEnd::SwupdateFinished(Err(err)) => {
+                    log::error!("fastboot-tcp {}: swupdate failed during download: {err}", self.peer);
+                    let _ = self.transport.send_packet(FAIL_EPIPE).await;
+                    self.sink.abort().await;
+                    return Err(err);
                 }
             }
         }
@@ -236,6 +228,55 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TcpFastbootSession<S> {
         self.sink = SwupdateSession::new(self.params.clone(), RECV_BUFFER_SIZE);
         self.fastboot_usb_session_open = false;
         self.fastboot_pending_flash = false;
+    }
+}
+
+struct FastbootDownloadSource<'a, S> {
+    transport: &'a mut FastbootFraming<S>,
+    remaining: usize,
+    frame_remaining: usize,
+}
+
+impl<'a, S> FastbootDownloadSource<'a, S> {
+    fn new(transport: &'a mut FastbootFraming<S>, total: usize) -> Self {
+        Self {
+            transport,
+            remaining: total,
+            frame_remaining: 0,
+        }
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> FastbootDownloadSource<'_, S> {
+    async fn read_block(&mut self, sink: &mut SwupdateSession) -> io::Result<Option<BytesMut>> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+
+        if self.frame_remaining == 0 {
+            let Some(frame_len) = self.transport.read_header().await? else {
+                return Err(io::Error::new(ErrorKind::UnexpectedEof, "connection closed mid-download"));
+            };
+            self.frame_remaining = frame_len as usize;
+        }
+
+        let want = self.frame_remaining.min(self.remaining).min(RECV_BUFFER_SIZE);
+        let mut buf = sink.buffer(want);
+        buf.resize(want, 0);
+        let read = self.transport.read_into(&mut buf).await?;
+        if read == 0 {
+            return Err(io::Error::new(ErrorKind::UnexpectedEof, "connection closed mid-download"));
+        }
+        buf.truncate(read);
+        self.frame_remaining -= read;
+        self.remaining -= read;
+        Ok(Some(buf))
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> SwupdatePumpSource for FastbootDownloadSource<'_, S> {
+    fn next_block<'a>(&'a mut self, sink: &'a mut SwupdateSession) -> NextSwupdateBlock<'a> {
+        Box::pin(self.read_block(sink))
     }
 }
 

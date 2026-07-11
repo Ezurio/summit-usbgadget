@@ -1,17 +1,25 @@
+use std::io;
+
 use bytes::{Bytes, BytesMut};
 
 use summit_usbgadget_swupdate::SwupdateSession;
 use summit_usbgadget_swupdate::sysinfo::SystemInfo;
+use usb_gadget::function::custom::EndpointSender;
 
-use super::functionfs::{send_data_header, send_static};
+use crate::send_static;
 use summit_usbgadget_fastboot_proto::{
-    fastboot_getvar_reply, parse_command, split_command, DownloadKind, FetchTarget, FlashTarget,
-    ParsedCommand,
+    data_header, fastboot_getvar_reply, parse_command, split_command, DownloadKind, FetchTarget,
+    FlashTarget, ParsedCommand,
 };
 use super::{
-    EndpointAction, FastbootUsbState, FAIL_BADSIZE, FAIL_CLOSE, FAIL_CMD, FAIL_FLASH,
+    FastbootUsbState, FAIL_BADSIZE, FAIL_CLOSE, FAIL_CMD, FAIL_FLASH,
     FAIL_OPEN, FAIL_UNKNOWN_PART, INFO_WAIT_SWUPDATE, OKAY,
 };
+
+/// Writes the `DATA%08X` data-phase reply header onto the fastboot-usb bulk IN endpoint.
+async fn send_data_header(tx: &mut EndpointSender, len: usize) -> io::Result<()> {
+    tx.send_async(Bytes::from(data_header(len))).await
+}
 
 async fn begin_download_command(state: &mut FastbootUsbState, udc_name: &str, label: &str) -> bool {
     let Some(download) = state.download.as_mut() else {
@@ -63,17 +71,22 @@ async fn handle_wopen_command(state: &mut FastbootUsbState, udc_name: &str) -> b
 }
 
 async fn handle_fetch_command(state: &mut FastbootUsbState, udc_name: &str, target: FetchTarget) -> bool {
-    let payload = SystemInfo::collect(Some(state.serial.clone())).to_json_bytes();
-    let len = payload.len();
+    let info = SystemInfo::collect(Some(state.serial.clone()));
     let target = match target {
         FetchTarget::Sysinfo => "sysinfo",
         FetchTarget::SysinfoJson => "sysinfo.json",
     };
+
+    // Serialize the JSON payload straight into the send buffer, after a 12-byte
+    // header placeholder, then backfill the `DATA%08X` header in place once the
+    // length is known — one buffer, one transfer, no separate payload copy.
+    let mut packet = b"DATA00000000".to_vec();
+    info.write_json(&mut packet);
+    let len = packet.len() - 12;
+    packet[..12].copy_from_slice(data_header(len).as_bytes());
+
     log::warn!("[{udc_name}] fastboot reply tx: DATA{:08X} (fetch {target})", len);
-    if send_data_header(&mut state.tx, len).await.is_err() {
-        return false;
-    }
-    if state.tx.send_async(Bytes::from(payload)).await.is_err() {
+    if state.tx.send_async(Bytes::from(packet)).await.is_err() {
         return false;
     }
     log::warn!("[{udc_name}] fastboot reply tx: OKAY (fetch)");
@@ -93,7 +106,7 @@ async fn start_download_transfer(
         return false;
     }
     if send_data_header(&mut state.tx, len).await.is_err() {
-        state.reset(udc_name, EndpointAction::Cancel, None).await;
+        state.reset(udc_name, None).await;
         return false;
     }
 

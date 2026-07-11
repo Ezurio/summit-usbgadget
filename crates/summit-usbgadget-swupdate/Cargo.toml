@@ -13,6 +13,7 @@ futures-util.workspace = true
 log.workspace = true
 rustix.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 swupdate-ipc.workspace = true
 tokio.workspace = true
 

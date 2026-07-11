@@ -142,6 +142,22 @@ pub enum Feed {
     Closed,
 }
 
+/// How a producer-driven SWUpdate pump ended.
+pub enum PumpToSwupdateEnd {
+    /// The producer had no more blocks to provide.
+    InputClosed,
+    /// SWUpdate reached a terminal verdict while the producer was still active.
+    SwupdateFinished(io::Result<()>),
+}
+
+/// Boxed future returned by a producer callback that yields the next block.
+pub type NextSwupdateBlock<'a> = Pin<Box<dyn Future<Output = io::Result<Option<BytesMut>>> + Send + 'a>>;
+
+/// Producer of reusable SWUpdate blocks.
+pub trait SwupdatePumpSource {
+    fn next_block<'a>(&'a mut self, sink: &'a mut SwupdateSession) -> NextSwupdateBlock<'a>;
+}
+
 /// A swupdate transfer.
 ///
 /// Three independent concerns, deliberately not wired to each other:
@@ -328,13 +344,22 @@ impl SwupdateSession {
 
     // --- Destruction: full immediate teardown (USB abort or swupdate abort). ---
 
+    /// Tears the session down for the caller's purposes without leaving
+    /// SWUpdate's own install stuck. Signals EOF the same way a normal finish
+    /// does (drops the sender) instead of aborting the drain task outright:
+    /// `drain_data` (stream.rs) only calls `writer.shutdown()` on the SWUpdate
+    /// connection when it observes EOF and returns normally — aborting the
+    /// task throws it away mid-write without ever notifying SWUpdate, leaving
+    /// its in-progress install stuck waiting for more data that will never
+    /// arrive (seen on hardware: a retried transfer stalls again because the
+    /// *previous* install was never told to stop). The data task is left
+    /// running detached (same as a normal finish never joins it) so a
+    /// still-writing/stuck backend can't block this call; only the
+    /// status-observer task (which never touches the data stream) is aborted.
     pub async fn abort(&mut self) {
         self.tx = None;
         self.recycle_rx = None;
-        if let Some(task) = self.data_task.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        self.data_task = None;
         if let Some(task) = self.status.take() {
             task.abort();
             let _ = task.await;
@@ -367,6 +392,32 @@ impl SwupdateSession {
             drop(tokio::spawn(async move {
                 restart::on_update_success(&update_type).await;
             }));
+        }
+    }
+}
+
+/// Repeatedly reads producer blocks and forwards them into `sink` until the
+/// producer is exhausted or SWUpdate reaches a verdict.
+pub async fn pump_to_swupdate<S>(
+    sink: &mut SwupdateSession,
+    source: &mut S,
+) -> io::Result<PumpToSwupdateEnd>
+where
+    S: SwupdatePumpSource,
+{
+    loop {
+        let Some(block) = source.next_block(sink).await? else {
+            return Ok(PumpToSwupdateEnd::InputClosed);
+        };
+
+        if sink.is_open()
+            && let Some(result) = sink.try_finished()
+        {
+            return Ok(PumpToSwupdateEnd::SwupdateFinished(result));
+        }
+
+        if matches!(sink.send(block).await?, Feed::Closed) {
+            return Ok(PumpToSwupdateEnd::SwupdateFinished(sink.finished().await));
         }
     }
 }

@@ -23,6 +23,7 @@ use hcd_dummy_support::{
 const FBK_VENDOR_ID: u16 = 0x1d50;
 const FBK_PRODUCT_ID: u16 = 0x6152;
 const FBK_CLOSE_PRODUCT_ID: u16 = 0x6154;
+const FBK_SHUTDOWN_PRODUCT_ID: u16 = 0x6155;
 const FBK_PRODUCT: &str = "summit-usbgadget FBK test";
 
 #[test]
@@ -41,6 +42,15 @@ fn hcd_dummy_fbk_close_edge_cases() -> Result<(), Box<dyn Error>> {
     let env = TestEnvironment::new()?;
 
     run_fbk_close_edge_cases(&env)
+}
+
+#[test]
+#[ignore = "requires root, configfs, and dummy_hcd"]
+fn hcd_dummy_fbk_shutdown_during_transfer() -> Result<(), Box<dyn Error>> {
+    let _guard = dummy_hcd_test_lock();
+    let env = TestEnvironment::new()?;
+
+    run_fbk_shutdown_during_transfer(&env)
 }
 
 fn run_fbk_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
@@ -91,7 +101,8 @@ fn run_fbk_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
     writer.flush()?;
     assert_eq!(read_exact(&mut reader, 4 + TEST_SERIAL.len())?, format!("OKAY{TEST_SERIAL}").into_bytes());
 
-    let expected_json = sysinfo::SystemInfo::collect(Some(TEST_SERIAL.to_string())).to_json_bytes();
+    let mut expected_json = Vec::new();
+    sysinfo::SystemInfo::collect(Some(TEST_SERIAL.to_string())).write_json(&mut expected_json);
     writer.write_all(b"fetch:sysinfo.json")?;
     writer.flush()?;
     let header = read_exact(&mut reader, 12)?;
@@ -201,6 +212,87 @@ fn run_fbk_close_edge_cases(env: &TestEnvironment) -> Result<(), Box<dyn Error>>
     server.shutdown()?;
     wait_for_usb_device_removal(FBK_VENDOR_ID, FBK_CLOSE_PRODUCT_ID, Duration::from_secs(10))?;
     assert_eq!(env.read_output()?, b"");
+
+    Ok(())
+}
+
+/// Shuts the gadget server down (unbinding the UDC, per
+/// `RunningGadget::shutdown`) while a fastboot-usb download is genuinely
+/// mid-flight: a receive request is submitted and only part of the declared
+/// payload has been written. This is exactly the scenario the ci_hdrc
+/// io_cancel-during-DMA crash concern (see AGENTS.md) is about, exercised via
+/// the real shutdown path (UDC unbind first, then cleanup) rather than a
+/// direct endpoint cancel. The assertion is simply that shutdown completes
+/// and the device disappears — no hang, no panic.
+fn run_fbk_shutdown_during_transfer(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
+    env.set_output("fastboot-usb-shutdown-mid-transfer.bin")?;
+
+    let config = GadgetConfig {
+        name: Some("summit-usbgadget-fastboot-usb-shutdown-dummy-hcd".to_string()),
+        udc: None,
+        os_descriptor: None,
+        device: DeviceConfig {
+            vendor: FBK_VENDOR_ID,
+            product: FBK_SHUTDOWN_PRODUCT_ID,
+            class: None,
+            sub_class: None,
+            protocol: None,
+            manufacturer: Some(TEST_MANUFACTURER.to_string()),
+            product_name: Some(FBK_PRODUCT.to_string()),
+            product_name_source: Some("custom".to_string()),
+            serial: Some(TEST_SERIAL.to_string()),
+            serial_source: Some("custom".to_string()),
+        },
+        config: vec![UsbConfigConfig {
+            description: Some("FBK shutdown-mid-transfer test".to_string()),
+            max_power: Some(100),
+            self_powered: Some(false),
+            remote_wakeup: Some(false),
+            function: vec![FunctionConfig::plugin(FastbootUsbFnConfig {
+                swupdate: SwupdateConfig {
+                    download: Some("swupdate".to_string()),
+                    software_set: None,
+                    image_mode: Some("complete".to_string()),
+                    dry_run: Some(true),
+                    disable_store_swu: Some(true),
+                    timeout_secs: Some(5),
+                },
+            })],
+        }],
+    };
+
+    let server = GadgetServer::spawn(config)?;
+    let _device_path = wait_for_usb_device(FBK_VENDOR_ID, FBK_SHUTDOWN_PRODUCT_ID, Duration::from_secs(10))?;
+    let (interface, ep_in_addr, ep_out_addr) =
+        claim_bulk_interface(FBK_VENDOR_ID, FBK_SHUTDOWN_PRODUCT_ID, 0xff, 0x42, 0x03)?;
+
+    let mut writer = interface.endpoint::<Bulk, Out>(ep_out_addr)?.writer(4096);
+    let mut reader = interface.endpoint::<Bulk, In>(ep_in_addr)?.reader(4096);
+
+    writer.write_all(b"WOpen:update")?;
+    writer.flush()?;
+    assert_eq!(read_exact(&mut reader, 4)?, b"OKAY");
+
+    // Declare a payload much larger than one recv buffer and only send part
+    // of it, so the download is genuinely still active (a receive request is
+    // in flight on the device side) when the server is shut down below.
+    const DECLARED_LEN: usize = 64 * 1024;
+    const SENT_LEN: usize = 8 * 1024;
+    writer.write_all(format!("download:{DECLARED_LEN:08x}").as_bytes())?;
+    writer.flush()?;
+    assert_eq!(read_exact(&mut reader, 12)?, format!("DATA{DECLARED_LEN:08x}").into_bytes());
+
+    writer.write_all(&vec![0x5au8; SENT_LEN])?;
+    writer.flush()?;
+
+    // No OKAY/FAIL is expected — the transfer is deliberately left incomplete.
+    // Tear down the host side, then shut the gadget server down while the
+    // download is still mid-flight; this must complete without hanging.
+    drop(writer);
+    drop(reader);
+    drop(interface);
+    server.shutdown()?;
+    wait_for_usb_device_removal(FBK_VENDOR_ID, FBK_SHUTDOWN_PRODUCT_ID, Duration::from_secs(10))?;
 
     Ok(())
 }

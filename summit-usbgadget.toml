@@ -9,7 +9,8 @@
 
 name = "composite"
 # udc selects which USB device controllers to bind. It may be:
-#   omitted          -> bind the first controller that appears
+#   omitted          -> bind every controller, now and as they appear (default)
+#   "first"          -> bind only the first controller that appears
 #   "11401000.usb"   -> bind that specific controller
 #   ["a.usb","b.usb"] -> bind each listed controller
 #   "all"            -> bind every controller, including hotplugged ones

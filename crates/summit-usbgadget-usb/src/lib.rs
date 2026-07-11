@@ -6,6 +6,7 @@
 //! This crate owns Linux UDC discovery and configfs/usb-gadget binding.
 
 pub mod config;
+pub mod functionfs;
 pub mod registry;
 #[doc(hidden)]
 pub use registry::__inventory_submit;

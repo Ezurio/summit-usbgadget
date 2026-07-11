@@ -21,12 +21,32 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/summit-usbgadget.toml";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `with_module_level` always wins over `.env()`'s RUST_LOG-derived default
+    // for any module it names (see simple_logger::Log::enabled: the longest
+    // matching module_levels entry is checked before falling back to the
+    // default level). Since "summit_usbgadget" prefix-matches every crate in
+    // this workspace, hard-coding its level here would make RUST_LOG unable to
+    // raise verbosity for our own code at all (third-party crates like
+    // usb_gadget would respect RUST_LOG, ours silently would not). Read
+    // RUST_LOG ourselves so it can override the default Info level instead.
+    let summit_level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|level| level.parse::<log::LevelFilter>().ok())
+        .unwrap_or(log::LevelFilter::Info);
+
     simple_logger::SimpleLogger::new()
         .with_level(log::LevelFilter::Warn)
-        .with_module_level("summit_usbgadget", log::LevelFilter::Info)
+        .with_module_level("summit_usbgadget", summit_level)
         .env()
         .init()
         .unwrap();
+
+    // Populate the boot-info cache once, up front, while this is still the
+    // only task running. The first call runs `boot-rootfs.sh` via a blocking
+    // subprocess; every service below shares one single-threaded runtime, so
+    // calling this lazily from within a service would stall all of them.
+    #[cfg(any(feature = "dfu", feature = "fastboot-usb", feature = "fastboot-tcp", feature = "socket"))]
+    let _ = summit_usbgadget_swupdate::sysinfo::boot_info();
 
     // Start every compiled-in plugin's registered service. Each plugin reads
     // its own section from the shared configuration file and runs itself.

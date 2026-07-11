@@ -5,10 +5,11 @@
 //! Runtime system information: boot context, hardware identity, and device
 //! metadata used by DFU/FBK/SWUpdate paths.
 
-use std::fmt::Write as _;
 use std::fs;
 use std::process::Command;
 use std::sync::OnceLock;
+
+use serde::Serialize;
 
 /// Boot rootfs context as reported by `boot-rootfs.sh`, plus hardware
 /// information resolved in the same script invocation.
@@ -89,18 +90,18 @@ pub fn inactive_side(current_side: Option<&str>) -> &'static str {
 }
 
 /// Collected system information.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SystemInfo {
     /// Device-tree model string.
-    pub model: Option<String>,
+    pub model: String,
     /// Serial number (as advertised by the USB gadget).
-    pub serial: Option<String>,
+    pub serial: String,
     /// SoC/CPU identifier.
-    pub soc: Option<String>,
+    pub soc: String,
     /// Total system memory in mebibytes.
-    pub memory_mb: Option<u64>,
+    pub memory_mb: u64,
     /// Base hardware part number.
-    pub hw_part_number: Option<String>,
+    pub hw_part_number: String,
 }
 
 impl SystemInfo {
@@ -108,87 +109,18 @@ impl SystemInfo {
     pub fn collect(serial: Option<String>) -> Self {
         let base = base_info();
         Self {
-            model: base.model.clone(),
-            serial,
-            soc: base.soc.clone(),
-            memory_mb: base.memory_mb,
-            hw_part_number: boot_info().hw_part_number.clone(),
+            model: base.model.clone().unwrap_or_default(),
+            serial: serial.unwrap_or_default(),
+            soc: base.soc.clone().unwrap_or_default(),
+            memory_mb: base.memory_mb.unwrap_or_default(),
+            hw_part_number: boot_info().hw_part_number.clone().unwrap_or_default(),
         }
     }
 
-    /// Serializes the information as newline-terminated `key=value` lines.
-    pub fn to_keyvalue(&self) -> String {
-        let mut s = String::new();
-        let _ = writeln!(s, "model={}", opt(&self.model));
-        let _ = writeln!(s, "serial={}", opt(&self.serial));
-        let _ = writeln!(s, "soc={}", opt(&self.soc));
-        let memory = self.memory_mb.map(|m| m.to_string());
-        let _ = writeln!(s, "memory_mb={}", memory.as_deref().unwrap_or("unknown"));
-        let _ = writeln!(s, "hw_part_number={}", opt(&self.hw_part_number));
-        s
-    }
-
-    /// Serializes the information to its byte representation.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.to_keyvalue().into_bytes()
-    }
-
-    /// Serializes the information as a compact JSON object.
-    pub fn to_json(&self) -> String {
-        let mut s = String::from("{");
-        push_json_field(&mut s, "model", self.model.as_deref().unwrap_or("unknown"));
-        s.push(',');
-        push_json_field(&mut s, "serial", self.serial.as_deref().unwrap_or("unknown"));
-        s.push(',');
-        push_json_field(&mut s, "soc", self.soc.as_deref().unwrap_or("unknown"));
-        s.push(',');
-        s.push_str("\"memory_mb\":");
-        if let Some(memory_mb) = self.memory_mb {
-            let _ = write!(s, "{memory_mb}");
-        } else {
-            s.push_str("null");
-        }
-        s.push(',');
-        push_json_field(
-            &mut s,
-            "hw_part_number",
-            self.hw_part_number.as_deref().unwrap_or("unknown"),
-        );
-        s.push('}');
-        s
-    }
-
-    /// Serializes the information to UTF-8 JSON bytes.
-    pub fn to_json_bytes(&self) -> Vec<u8> {
-        self.to_json().into_bytes()
-    }
-}
-
-fn opt(value: &Option<String>) -> &str {
-    value.as_deref().unwrap_or("unknown")
-}
-
-fn push_json_field(out: &mut String, key: &str, value: &str) {
-    out.push('"');
-    out.push_str(key);
-    out.push_str("\":\"");
-    push_json_escaped(out, value);
-    out.push('"');
-}
-
-fn push_json_escaped(out: &mut String, value: &str) {
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch.is_control() => {
-                let _ = write!(out, "\\u{:04x}", ch as u32);
-            }
-            ch => out.push(ch),
-        }
+    /// Serializes the compact JSON object representation into `out`.
+    pub fn write_json(&self, out: &mut Vec<u8>) {
+        // `Vec<u8>` is an infallible `io::Write` sink, so serialization cannot fail.
+        let _ = serde_json::to_writer(out, self);
     }
 }
 
