@@ -38,16 +38,20 @@ cfg_os_poll! {
             target_os = "watchos",
         )
     ), path = "selector/kqueue.rs")]
+    #[cfg_attr(all(
+        not(mio_unsupported_force_poll_poll),
+        target_os = "solaris",
+    ), path = "selector/event_ports.rs")]
     #[cfg_attr(any(
         mio_unsupported_force_poll_poll,
         target_os = "aix",
         target_os = "espidf",
+        target_os = "nuttx",
         target_os = "fuchsia",
         target_os = "haiku",
         target_os = "hermit",
         target_os = "hurd",
         target_os = "nto",
-        target_os = "solaris",
         target_os = "vita",
         target_os = "cygwin",
         target_os = "wasi",
@@ -61,6 +65,7 @@ cfg_os_poll! {
         any(
             target_os = "android",
             target_os = "espidf",
+            target_os = "nuttx",
             target_os = "fuchsia",
             target_os = "hermit",
             target_os = "illumos",
@@ -79,6 +84,10 @@ cfg_os_poll! {
             target_os = "watchos",
         )
     ), path = "waker/kqueue.rs")]
+    #[cfg_attr(all(
+        not(mio_unsupported_force_poll_poll),
+        target_os = "solaris",
+    ), path = "waker/event_ports.rs")]
     #[cfg_attr(any(
         // NOTE: also add to the list for the `pipe` module below.
         mio_unsupported_force_waker_pipe,
@@ -102,13 +111,15 @@ cfg_os_poll! {
         target_os = "nto",
         target_os = "openbsd",
         target_os = "redox",
-        target_os = "solaris",
+        all(mio_unsupported_force_poll_poll, target_os = "solaris"),
         target_os = "vita",
         target_os = "cygwin",
         all(target_os = "wasi", target_env = "p1")
     ), path = "waker/pipe.rs")]
     #[cfg_attr(any(target_os = "horizon", all(target_os = "wasi", not(target_env = "p1"))), path = "waker/single_threaded.rs")]
     mod waker;
+    #[cfg(all(not(mio_unsupported_force_poll_poll), target_os = "solaris"))]
+    pub(crate) use self::waker::Waker;
     // NOTE: the `Waker` type is expected in the selector module as the
     // `poll(2)` implementation needs to do some special stuff.
 
@@ -153,7 +164,7 @@ cfg_os_poll! {
             target_os = "nto",
             target_os = "openbsd",
             target_os = "redox",
-            target_os = "solaris",
+            all(mio_unsupported_force_poll_poll, target_os = "solaris"),
             target_os = "vita",
             target_os = "cygwin",
         ),

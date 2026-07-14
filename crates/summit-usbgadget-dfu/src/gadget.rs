@@ -76,6 +76,16 @@ pub async fn serve(udc_name: String, mut runtime: DfuRuntime) {
 }
 
 impl EventHandler for Dfu {
+    /// Idle timeout only while a transfer is in progress; see [`Dfu::dfu_idle_timeout`].
+    fn idle_timeout(&self) -> Option<std::time::Duration> {
+        self.dfu_idle_timeout()
+    }
+
+    /// The host went quiet mid-transfer: reset instead of leaving it stuck.
+    async fn on_idle_timeout(&mut self, _udc_name: &str) {
+        self.reset_on_idle_timeout().await;
+    }
+
     /// Dispatches a single FunctionFS event to the DFU state machine.
     async fn handle_event(&mut self, _udc_name: &str, event: Event<'_>) -> std::io::Result<()> {
         match event {

@@ -13,7 +13,8 @@ use std::io::{self, ErrorKind};
 use std::time::Duration;
 
 use bytes::BytesMut;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 /// Handshake we send: fastboot TCP protocol version 1.
@@ -25,9 +26,9 @@ const PROTOCOL_VERSION: u32 = 1;
 /// [`FastbootFraming::read_header`] and are not bound by this limit.
 const MAX_COMMAND_LEN: u64 = 4096;
 
-/// Length-prefixed fastboot framing over an async byte stream.
-pub(crate) struct FastbootFraming<S> {
-    stream: S,
+/// Length-prefixed fastboot framing over a TCP connection.
+pub(crate) struct FastbootFraming {
+    stream: TcpStream,
     /// Idle timeout applied to each read; `None` waits indefinitely.
     inactivity_timeout: Option<Duration>,
 }
@@ -46,8 +47,8 @@ where
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> FastbootFraming<S> {
-    pub(crate) fn new(stream: S, inactivity_timeout: Option<Duration>) -> Self {
+impl FastbootFraming {
+    pub(crate) fn new(stream: TcpStream, inactivity_timeout: Option<Duration>) -> Self {
         Self { stream, inactivity_timeout }
     }
 
@@ -134,5 +135,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> FastbootFraming<S> {
     /// download totals are satisfied.
     pub(crate) async fn read_into(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         read_guard(self.inactivity_timeout, self.stream.read(buf)).await
+    }
+
+    /// Closes the connection (sends FIN), bounded by `shutdown_timeout` so a
+    /// peer that never acknowledges the close cannot stall the session
+    /// indefinitely. Matches the socket-update transport's own close handshake.
+    pub(crate) async fn shutdown(&mut self, shutdown_timeout: Duration) -> io::Result<()> {
+        timeout(shutdown_timeout, self.stream.shutdown())
+            .await
+            .map_err(|_| io::Error::new(ErrorKind::TimedOut, "fastboot-tcp connection shutdown timed out"))?
     }
 }

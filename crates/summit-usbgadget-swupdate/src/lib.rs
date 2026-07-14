@@ -130,6 +130,18 @@ fn queue_capacity(block_size: usize) -> usize {
     TARGET_QUEUE_BYTES.div_ceil(block_size.max(1)).max(2)
 }
 
+/// Connects to the backend (spawns `fw_update` or dials SWUpdate's IPC
+/// socket). Slow, and deliberately a plain async fn so a caller can hand off
+/// the resulting future to be driven by a spawned task instead of awaiting it
+/// directly.
+async fn connect_backend(use_pipe: bool, params: SwupdateParams, running_mode: String) -> io::Result<stream::TransportSpec> {
+    if use_pipe {
+        pipe::begin(&params, &running_mode).await
+    } else {
+        ipc::begin(&params, &running_mode).await
+    }
+}
+
 /// Result of feeding a firmware block into the queue.
 pub enum Feed {
     /// Queued (its length in bytes).
@@ -177,7 +189,6 @@ pub struct SwupdateSession {
     update_type: Option<EffectiveUpdateType>,
     tx: Option<mpsc::Sender<BytesMut>>,
     recycle_rx: Option<mpsc::Receiver<BytesMut>>,
-    data_task: Option<JoinHandle<()>>,
     status: Option<JoinHandle<io::Result<()>>>,
     terminal: Option<Result<(), String>>,
 }
@@ -199,7 +210,6 @@ impl SwupdateSession {
             update_type: None,
             tx: None,
             recycle_rx: None,
-            data_task: None,
             status: None,
             terminal: None,
         }
@@ -224,8 +234,11 @@ impl SwupdateSession {
         buf
     }
 
-    /// Starts the backend transport and spawns the data-drain and status tasks.
-    pub async fn open(&mut self) -> io::Result<()> {
+    /// Sets up the queue and hands it to the caller immediately; connecting to
+    /// the backend (spawning `fw_update` or dialing SWUpdate's IPC socket) is
+    /// slow, so it happens inside the spawned task instead -- this never
+    /// blocks, so callers on the DFU request path never stall on it.
+    pub fn open(&mut self) -> io::Result<()> {
         if self.is_open() {
             return Ok(());
         }
@@ -246,31 +259,27 @@ impl SwupdateSession {
             running_mode,
         );
         self.update_type = Some(update_type);
-        let spec = if info.use_pipe_mode() {
-            pipe::begin(&self.params, &running_mode).await?
-        } else {
-            ipc::begin(&self.params, &running_mode).await?
-        };
-        let tasks = stream::spawn(spec, queue_capacity(self.max_block_size), self.params.clone());
+
+        let connect = connect_backend(info.use_pipe_mode(), self.params.clone(), running_mode);
+        let tasks = stream::spawn(connect, queue_capacity(self.max_block_size), self.params.clone());
         self.tx = Some(tasks.tx);
         self.recycle_rx = Some(tasks.recycle_rx);
-        self.data_task = Some(tasks.data);
         self.status = Some(tasks.status);
         Ok(())
     }
 
-    async fn ensure_open(&mut self) -> io::Result<()> {
+    fn ensure_open(&mut self) -> io::Result<()> {
         if self.tx.is_some() || self.status.is_some() || self.terminal.is_some() {
             return Ok(());
         }
-        self.open().await
+        self.open()
     }
 
     // --- Feed side: the only methods that touch the data stream. ---
 
     /// Tries to enqueue a block without blocking.
     pub async fn try_send(&mut self, item: BytesMut) -> io::Result<Feed> {
-        self.ensure_open().await?;
+        self.ensure_open()?;
         let len = item.len();
         let result = match self.tx.as_ref() {
             Some(tx) => tx.try_send(item),
@@ -288,7 +297,7 @@ impl SwupdateSession {
 
     /// Enqueues a block, awaiting a free slot.
     pub async fn send(&mut self, item: BytesMut) -> io::Result<Feed> {
-        self.ensure_open().await?;
+        self.ensure_open()?;
         let len = item.len();
         let outcome = match self.tx.as_ref() {
             Some(tx) => tx.send(item).await,
@@ -359,7 +368,6 @@ impl SwupdateSession {
     pub async fn abort(&mut self) {
         self.tx = None;
         self.recycle_rx = None;
-        self.data_task = None;
         if let Some(task) = self.status.take() {
             task.abort();
             let _ = task.await;

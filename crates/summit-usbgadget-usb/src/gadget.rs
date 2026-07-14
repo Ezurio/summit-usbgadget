@@ -19,8 +19,10 @@ use std::fs;
 use std::future::{pending, Future};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::registry::FunctionBuildContext;
+use futures_util::future::join_all;
 use futures_util::StreamExt;
 use summit_usbgadget_config::{PluginConfig, Shutdown};
 use tokio::task::JoinHandle;
@@ -115,7 +117,7 @@ impl RunningGadget {
     }
 
     async fn shutdown(mut self) {
-        // Unbind from the UDC before aborting tasks.  On ARM platforms using
+        // Unbind from the UDC before touching tasks.  On ARM platforms using
         // the ci_hdrc USB controller, calling io_cancel while a bulk-OUT DMA
         // transfer is in flight triggers a kernel crash:
         //   ffs_aio_cancel → ep_dequeue [ci_hdrc] → usb_gadget_unmap_request
@@ -131,12 +133,40 @@ impl RunningGadget {
 
         let tasks = std::mem::take(&mut self.tasks);
 
-        for task in &tasks {
-            task.abort();
-        }
+        // Endpoint-zero control loops (DFU, and fastboot-usb's control plane --
+        // both drive `functionfs::serve`) don't use cancellable AIO: `CtrlReceiver`/
+        // `CtrlSender` recv/send a control transfer with a plain blocking
+        // read/write run on a `spawn_blocking` thread. Aborting such a task while
+        // that blocking call is in flight only unwinds the *outer* future --
+        // `JoinHandle::abort`/dropping the inner `spawn_blocking` `JoinHandle`
+        // does not stop the detached OS thread, which keeps the read/write
+        // syscall running on ep0. If that orphaned syscall loses the race
+        // against the rest of gadget teardown (this fn returning, `RegGadget`
+        // being dropped, the FunctionFS instance going away), the driver logs a
+        // spurious-looking but symptomatic error, e.g.:
+        //   dwc3 ...: request ... was not queued to ep0out
+        //
+        // The unbind above already forces any pending ep0 (and bulk AIO)
+        // request to complete with an error, so in the common case every task
+        // notices via its own `is_torn_down_transport_error` check and returns
+        // on its own almost immediately -- which naturally drains any
+        // `spawn_blocking` thread before we consider the task done. Give tasks
+        // a short grace period to exit that way; only hard-`abort()` ones that
+        // are still stuck afterwards (e.g. blocked on something unbind can't
+        // unblock), as a fallback rather than the default path.
+        const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+        let joins = tasks.into_iter().map(|mut task| async move {
+            match tokio::time::timeout(SHUTDOWN_GRACE, &mut task).await {
+                Ok(result) => result,
+                Err(_) => {
+                    task.abort();
+                    task.await
+                }
+            }
+        });
 
-        for task in tasks {
-            match task.await {
+        for result in join_all(joins).await {
+            match result {
                 Ok(()) => {}
                 Err(err) if err.is_cancelled() => {}
                 Err(err) => log::warn!("FunctionFS task ended with error during shutdown: {err}"),

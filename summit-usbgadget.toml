@@ -90,6 +90,7 @@ poll_timeout_ms = 10
 # address = "0.0.0.0:5554"      # default; 5554 is the fastboot TCP port
 # accept_timeout_secs = 15       # optional; omit to block waiting for a client
 # inactivity_timeout_secs = 30   # default; idle connection drop, 0 disables
+# shutdown_timeout_secs = 15     # default; grace period for the close handshake
 # serial = "0123456789abcdef"    # advertised via getvar:serialno / sysinfo
 # software_set = "stable"
 # image_mode = "full"

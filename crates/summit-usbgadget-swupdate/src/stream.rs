@@ -53,23 +53,29 @@ impl TransportSpec {
 pub(crate) struct Tasks {
     pub(crate) tx: mpsc::Sender<BytesMut>,
     pub(crate) recycle_rx: mpsc::Receiver<BytesMut>,
-    pub(crate) data: JoinHandle<()>,
     pub(crate) status: JoinHandle<io::Result<()>>,
 }
 
-/// Spawns the data-drain and status tasks for a transfer.
-pub(crate) fn spawn(spec: TransportSpec, capacity: usize, params: SwupdateParams) -> Tasks {
-    let TransportSpec { writer, status } = spec;
+/// Spawns the tasks for a transfer. `connect` performs the actual backend
+/// setup -- spawning `fw_update` or dialing SWUpdate's IPC socket, both slow
+/// -- entirely inside the spawned task, never awaited by the caller: the
+/// channel exists and `tx` is usable immediately, so a producer (the DFU
+/// request path) can start queueing blocks right away and is never stalled
+/// waiting for the connection. Queued blocks simply sit buffered until the
+/// connection completes and the drain task starts writing them out.
+pub(crate) fn spawn(
+    connect: impl Future<Output = io::Result<TransportSpec>> + Send + 'static,
+    capacity: usize,
+    params: SwupdateParams,
+) -> Tasks {
     let (tx, rx) = mpsc::channel(capacity);
     let (recycle_tx, recycle_rx) = mpsc::channel(capacity);
-    let data = tokio::spawn(drain_data(writer, rx, recycle_tx));
-    let status = tokio::spawn(status(params));
-    Tasks {
-        tx,
-        recycle_rx,
-        data,
-        status,
-    }
+    let status = tokio::spawn(async move {
+        let TransportSpec { writer, status } = connect.await?;
+        let _ = tokio::spawn(drain_data(writer, rx, recycle_tx));
+        status(params).await
+    });
+    Tasks { tx, recycle_rx, status }
 }
 
 /// Drains queued blocks into the writer, best-effort. Stops if the backend

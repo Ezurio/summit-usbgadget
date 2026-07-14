@@ -13,42 +13,33 @@
 use std::io::{self, ErrorKind};
 
 use bytes::BytesMut;
-use summit_usbgadget_fastboot_proto::{
-    data_header, fastboot_getvar_reply, parse_command, DownloadKind, FetchTarget, FlashTarget,
-    ParsedCommand, FAIL_CLOSE, FAIL_CMD, FAIL_EPIPE, FAIL_FLASH, FAIL_OPEN, FAIL_UNKNOWN_PART,
-    INFO_WAIT_SWUPDATE, OKAY,
-};
+use summit_usbgadget_fastboot_proto::reply::*;
+use summit_usbgadget_fastboot_proto::{data_header, fastboot_getvar_reply, parse_command, DownloadKind, FetchTarget, FlashTarget, ParsedCommand};
 use summit_usbgadget_swupdate::sysinfo::SystemInfo;
 use summit_usbgadget_swupdate::{pump_to_swupdate, NextSwupdateBlock, PumpToSwupdateEnd, SwupdateParams, SwupdatePumpSource, SwupdateSession};
-use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::transport::FastbootFraming;
-use crate::RECV_BUFFER_SIZE;
+use crate::{FastbootTcpConfig, RECV_BUFFER_SIZE};
 
 /// One fastboot-over-TCP client session.
-pub(crate) struct TcpFastbootSession<S> {
-    transport: FastbootFraming<S>,
+pub(crate) struct TcpFastbootSession<'a> {
+    transport: FastbootFraming,
+    config: &'a FastbootTcpConfig,
     params: SwupdateParams,
     sink: SwupdateSession,
-    serial: String,
     peer: String,
     fastboot_usb_session_open: bool,
     fastboot_pending_flash: bool,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> TcpFastbootSession<S> {
-    pub(crate) fn new(
-        transport: FastbootFraming<S>,
-        params: SwupdateParams,
-        serial: String,
-        peer: String,
-    ) -> Self {
+impl<'a> TcpFastbootSession<'a> {
+    pub(crate) fn new(transport: FastbootFraming, config: &'a FastbootTcpConfig, params: SwupdateParams, peer: String) -> Self {
         let sink = SwupdateSession::new(params.clone(), RECV_BUFFER_SIZE);
         Self {
             transport,
+            config,
             params,
             sink,
-            serial,
             peer,
             fastboot_usb_session_open: false,
             fastboot_pending_flash: false,
@@ -56,7 +47,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TcpFastbootSession<S> {
     }
 
     /// Handshakes and services commands until the client disconnects or a fatal
-    /// transport error occurs. On error the SWUpdate sink is torn down.
+    /// transport error occurs. On error the SWUpdate sink is torn down. Either
+    /// way the connection is then closed gracefully, bounded by the configured
+    /// shutdown timeout, matching the socket-update transport.
     pub(crate) async fn run(mut self) -> io::Result<()> {
         self.transport.handshake().await?;
         log::info!("fastboot-tcp {} handshake complete", self.peer);
@@ -65,7 +58,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TcpFastbootSession<S> {
         if result.is_err() {
             self.sink.abort().await;
         }
-        result
+
+        let shutdown = self.transport.shutdown(self.config.shutdown_timeout()).await;
+        result.and(shutdown)
     }
 
     async fn command_loop(&mut self) -> io::Result<()> {
@@ -101,7 +96,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TcpFastbootSession<S> {
     }
 
     async fn handle_wopen(&mut self) -> io::Result<()> {
-        if let Err(err) = self.sink.open().await {
+        if let Err(err) = self.sink.open() {
             log::error!("fastboot-tcp {}: WOpen begin failed: {err}", self.peer);
             return self.transport.send_packet(FAIL_OPEN).await;
         }
@@ -111,7 +106,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TcpFastbootSession<S> {
     }
 
     async fn handle_getvar(&mut self, cmd: &[u8]) -> io::Result<()> {
-        match fastboot_getvar_reply(cmd, &self.serial) {
+        match fastboot_getvar_reply(cmd, &self.config.serial) {
             Some(reply) => self.transport.send_packet(&reply).await,
             None => self.transport.send_packet(FAIL_CMD).await,
         }
@@ -126,7 +121,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TcpFastbootSession<S> {
         // length-prefix placeholder, then backfill the prefix and send the whole
         // frame in one write — no intermediate payload buffer, no split writes.
         let mut frame = vec![0u8; 8];
-        SystemInfo::collect(Some(self.serial.clone())).write_json(&mut frame);
+        SystemInfo::collect(Some(self.config.serial.clone())).write_json(&mut frame);
         let len = frame.len() - 8;
         frame[..8].copy_from_slice(&(len as u64).to_be_bytes());
         log::info!("fastboot-tcp {}: fetch {label} ({len} bytes)", self.peer);
@@ -137,7 +132,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TcpFastbootSession<S> {
 
     async fn handle_download(&mut self, len: usize, kind: DownloadKind) -> io::Result<()> {
         if !self.sink.is_open()
-            && let Err(err) = self.sink.open().await
+            && let Err(err) = self.sink.open()
         {
             log::error!("fastboot-tcp {}: download begin failed: {err}", self.peer);
             return self.transport.send_packet(FAIL_OPEN).await;
@@ -231,14 +226,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TcpFastbootSession<S> {
     }
 }
 
-struct FastbootDownloadSource<'a, S> {
-    transport: &'a mut FastbootFraming<S>,
+struct FastbootDownloadSource<'a> {
+    transport: &'a mut FastbootFraming,
     remaining: usize,
     frame_remaining: usize,
 }
 
-impl<'a, S> FastbootDownloadSource<'a, S> {
-    fn new(transport: &'a mut FastbootFraming<S>, total: usize) -> Self {
+impl<'a> FastbootDownloadSource<'a> {
+    fn new(transport: &'a mut FastbootFraming, total: usize) -> Self {
         Self {
             transport,
             remaining: total,
@@ -247,7 +242,7 @@ impl<'a, S> FastbootDownloadSource<'a, S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> FastbootDownloadSource<'_, S> {
+impl FastbootDownloadSource<'_> {
     async fn read_block(&mut self, sink: &mut SwupdateSession) -> io::Result<Option<BytesMut>> {
         if self.remaining == 0 {
             return Ok(None);
@@ -274,107 +269,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> FastbootDownloadSource<'_, S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> SwupdatePumpSource for FastbootDownloadSource<'_, S> {
+impl SwupdatePumpSource for FastbootDownloadSource<'_> {
     fn next_block<'a>(&'a mut self, sink: &'a mut SwupdateSession) -> NextSwupdateBlock<'a> {
         Box::pin(self.read_block(sink))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-
-    async fn client_handshake(client: &mut DuplexStream) {
-        client.write_all(b"FB01").await.unwrap();
-        let mut buf = [0u8; 4];
-        let _ = client.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"FB01");
-    }
-
-    async fn send_frame(client: &mut DuplexStream, data: &[u8]) {
-        client.write_all(&(data.len() as u64).to_be_bytes()).await.unwrap();
-        client.write_all(data).await.unwrap();
-    }
-
-    async fn recv_frame(client: &mut DuplexStream) -> Vec<u8> {
-        let mut header = [0u8; 8];
-        let _ = client.read_exact(&mut header).await.unwrap();
-        let len = u64::from_be_bytes(header) as usize;
-        let mut buf = vec![0u8; len];
-        let _ = client.read_exact(&mut buf).await.unwrap();
-        buf
-    }
-
-    #[tokio::test]
-    async fn handshake_and_getvar_over_tcp() {
-        let (server, mut client) = tokio::io::duplex(4096);
-        let session = TcpFastbootSession::new(
-            FastbootFraming::new(server, None),
-            SwupdateParams::default(),
-            "abc123".to_string(),
-            "test".to_string(),
-        );
-        let server_task = tokio::spawn(session.run());
-
-        client_handshake(&mut client).await;
-
-        send_frame(&mut client, b"getvar:version").await;
-        assert_eq!(recv_frame(&mut client).await, b"OKAY0.4");
-
-        send_frame(&mut client, b"getvar:serialno").await;
-        assert_eq!(recv_frame(&mut client).await, b"OKAYabc123");
-
-        send_frame(&mut client, b"getvar:nonexistent").await;
-        assert_eq!(recv_frame(&mut client).await, b"FAILunknown command");
-
-        send_frame(&mut client, b"powerdown").await;
-        assert_eq!(recv_frame(&mut client).await, b"FAILunknown command");
-
-        drop(client);
-        server_task.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn rejects_malformed_handshake() {
-        let (server, mut client) = tokio::io::duplex(64);
-        let session = TcpFastbootSession::new(
-            FastbootFraming::new(server, None),
-            SwupdateParams::default(),
-            "abc123".to_string(),
-            "test".to_string(),
-        );
-        let server_task = tokio::spawn(session.run());
-
-        // Read (and ignore) the device handshake, then send a bad one.
-        let mut buf = [0u8; 4];
-        let _ = client.read_exact(&mut buf).await.unwrap();
-        client.write_all(b"XX01").await.unwrap();
-        drop(client);
-
-        let result = server_task.await.unwrap();
-        assert!(result.is_err(), "malformed handshake should fail the session");
-    }
-
-    #[tokio::test]
-    async fn idle_connection_times_out() {
-        let (server, mut client) = tokio::io::duplex(64);
-        let session = TcpFastbootSession::new(
-            FastbootFraming::new(server, Some(Duration::from_millis(50))),
-            SwupdateParams::default(),
-            "abc123".to_string(),
-            "test".to_string(),
-        );
-        let server_task = tokio::spawn(session.run());
-
-        // Complete the handshake, then stay idle without sending a command.
-        client_handshake(&mut client).await;
-
-        let err = server_task
-            .await
-            .unwrap()
-            .expect_err("an idle connection should time out");
-        assert_eq!(err.kind(), ErrorKind::TimedOut);
-    }
-}
+mod tests;

@@ -90,8 +90,7 @@ impl Dfu {
     /// received separately in [`receive_dnload_block`](Self::receive_dnload_block);
     /// the requests dispatched here carry no OUT data stage.
     pub(crate) async fn handle_out(&mut self, req: &CtrlReq) -> io::Result<()> {
-        self.poll_download_progress().await?;
-        self.poll_manifest().await;
+        self.poll().await?;
 
         match req.request {
             request::DETACH => {
@@ -107,10 +106,7 @@ impl Dfu {
             }
             request::CLRSTATUS => {
                 log::debug!("DFU_CLRSTATUS");
-                if self.state == State::Error
-                    || self.is_finishing()
-                    || self.sink.is_none()
-                {
+                if self.state == State::Error || self.is_finishing() {
                     self.abort_transfer().await;
                 } else {
                     self.status = Status::Ok;
@@ -145,14 +141,52 @@ impl Dfu {
         self.download_crc = Hasher::new();
     }
 
+    /// Idle-timeout duration for the endpoint-zero loop: `None` while
+    /// genuinely idle (waiting for a transfer to start), otherwise derived
+    /// from the poll interval already told to the host in `DFU_GETSTATUS` --
+    /// if dfu-util hasn't polled within many multiples of its own instructed
+    /// interval, it's gone.
+    pub(crate) fn dfu_idle_timeout(&self) -> Option<std::time::Duration> {
+        (self.state != State::DfuIdle).then(|| {
+            std::time::Duration::from_millis(self.poll_timeout_ms.max(MANIFEST_POLL_TIMEOUT_MS) as u64 * 20)
+        })
+    }
+
+    /// Called when the host goes quiet mid-transfer. Stops feeding swupdate
+    /// with `eof` (not `abort_transfer`'s full sink abort) so its status task
+    /// can still resolve on its own in the background, and resets the state
+    /// machine so the next attempt starts clean.
+    pub(crate) async fn reset_on_idle_timeout(&mut self) {
+        if self.state == State::DfuIdle {
+            return;
+        }
+        log::warn!("DFU: no host activity during transfer, resetting");
+        if let Some(sink) = self.sink.as_mut() {
+            sink.eof();
+        }
+        self.sink = Some(SwupdateSession::new(self.download.clone(), self.transfer_size as usize));
+        self.pending = None;
+        self.status = Status::Ok;
+        self.state = State::DfuIdle;
+        self.download_tail.clear();
+        self.download_crc = Hasher::new();
+    }
+
+    /// Aborts the current transfer and reports it as a DFU error, for
+    /// sequencing violations the host should never trigger (e.g. sending more
+    /// data while the device is still busy accepting a previous block).
+    async fn abort_with_fault(&mut self, status: Status) {
+        self.abort_transfer().await;
+        self.fault(status);
+    }
+
     /// Handles a device-to-host DFU control request, returning the response
     /// payload to send back to the host.
     pub(crate) async fn handle_in(&mut self, req: &CtrlReq) -> io::Result<InReply> {
-        self.poll_download_progress().await?;
-        self.poll_manifest().await;
+        self.poll().await?;
 
         match req.request {
-            request::GETSTATUS => Ok(self.get_status().await),
+            request::GETSTATUS => Ok(self.get_status()),
             request::GETSTATE => Ok(InReply::from_state(self.state)),
             request::UPLOAD => self.upload_block(req).await,
             other => {
@@ -164,44 +198,41 @@ impl Dfu {
     }
 
     /// Performs the manifestation (programming) phase after a zero-length
-    /// `DFU_DNLOAD`, mapping the sink's outcome to a DFU state and status.
+    /// `DFU_DNLOAD`. The device transitions to `Manifest` immediately (there
+    /// is no data in this request to lose by accepting it late). Any tail
+    /// bytes go through the same `submit_chunk` path as a regular block; once
+    /// the holding area is empty, `push_pending` (via `submit_chunk` or the
+    /// existing retry in `poll`/`get_status`) signals EOF.
     async fn manifest(&mut self) -> io::Result<()> {
         log::info!("DFU_DNLOAD complete, entering manifestation");
-        self.state = State::Manifest;
         self.status = Status::Ok;
+        self.state = State::Manifest;
 
-        if self.sink.is_none() {
-            self.fault(Status::ErrUnknown);
+        let tail = std::mem::take(&mut self.download_tail);
+        if tail.is_empty() || has_valid_dfu_suffix(&self.download_crc, &tail) {
+            if !tail.is_empty() {
+                log::info!("ignoring trailing DFU suffix before manifestation");
+            }
+            let _ = self.push_pending().await?;
             return Ok(());
         }
 
-        let tail = std::mem::take(&mut self.download_tail);
-        if has_valid_dfu_suffix(&self.download_crc, &tail) {
-            log::info!("ignoring trailing DFU suffix before manifestation");
-        } else if !tail.is_empty() {
-            let chunk = {
-                let sink = self.sink.as_mut().expect("sink present");
-                recycled_chunk_buffer(sink, &tail)
-            };
-            self.enqueue_chunk(chunk).await?;
-        }
-
-        // Flush any stashed block into the queue, then signal EOF (no more
-        // data). Finalization is observed by poll_manifest via the status
-        // signal, not driven from here.
-        if let Some(prev) = self.pending.take() {
-            let _ = self.sink.as_mut().expect("sink present").send(prev).await?;
-        }
-        self.sink.as_mut().expect("sink present").eof();
-        Ok(())
+        let chunk = {
+            let sink = self.sink.as_mut().expect("sink present");
+            recycled_chunk_buffer(sink, &tail)
+        };
+        self.submit_chunk(chunk).await
     }
 
     /// Builds the `DFU_GETSTATUS` response and advances the synchronous parts
-    /// of the state machine.
-    async fn get_status(&mut self) -> InReply {
+    /// of the state machine. `pending` already reflects the outcome of the
+    /// `push_pending` call made moments earlier in `poll` (at the top of this
+    /// same request), so busy/idle is read straight off it rather than
+    /// pushing again.
+    fn get_status(&mut self) -> InReply {
         self.state = match self.state {
             State::DnloadSync | State::DnBusy => {
-                if self.download_is_busy().await {
+                if self.pending.is_some() {
                     State::DnBusy
                 } else {
                     State::DnloadIdle
@@ -268,52 +299,58 @@ impl Dfu {
         matches!(self.state, State::Manifest | State::ManifestSync)
     }
 
-    /// Tries to flush a previously stashed block. Returns `true` while a block
-    /// is still stashed (i.e. the host should keep seeing `dfuDNBUSY`).
-    async fn flush_pending(&mut self) -> io::Result<bool> {
-        let Some(chunk) = self.pending.take() else {
-            return Ok(false);
-        };
-        let Some(sink) = self.sink.as_mut() else {
-            return Ok(false);
-        };
-        match sink.try_send(chunk).await? {
-            Feed::Ok(_) => Ok(false),
-            Feed::Full(chunk) => {
-                self.pending = Some(chunk);
-                Ok(true)
-            }
-            Feed::Closed => Ok(false),
+    /// Submits a freshly-received block: a block should only arrive once any
+    /// previously stashed block has drained (a compliant host waits for
+    /// `dfuDNBUSY` to clear, observed via `GET_STATUS`, before sending more
+    /// data). If `pending` is still occupied, the host violated that
+    /// sequencing, so the transfer is aborted rather than risk silently losing
+    /// or reordering firmware data. Otherwise the block is stored in the
+    /// single-slot holding area and given one immediate try at the queue via
+    /// `push_pending`.
+    async fn submit_chunk(&mut self, chunk: BytesMut) -> io::Result<()> {
+        if self.pending.is_some() {
+            log::error!(
+                "DFU protocol violation: block received while a previous block is still busy"
+            );
+            self.abort_with_fault(Status::ErrStalledPkt).await;
+            return Ok(());
         }
+        self.pending = Some(chunk);
+        let _ = self.push_pending().await?;
+        Ok(())
     }
 
-    /// Enqueues a firmware block, stashing it (busy) if the queue is full.
-    async fn enqueue_chunk(&mut self, chunk: BytesMut) -> io::Result<()> {
-        // Any block stashed from an earlier busy reply goes first. The host
-        // should not send a new block while busy, so this rarely blocks.
-        if let Some(prev) = self.pending.take() {
-            let sink = self
-                .sink
-                .as_mut()
-                .ok_or_else(|| io::Error::other("manifestation in progress"))?;
-            let _ = sink.send(prev).await?;
-        }
-        let sink = self
-            .sink
-            .as_mut()
-            .ok_or_else(|| io::Error::other("manifestation in progress"))?;
-        match sink.try_send(chunk).await? {
-            Feed::Ok(_) => Ok(()),
-            Feed::Full(chunk) => {
-                self.pending = Some(chunk);
-                Ok(())
+    /// Pushes the held block (if any) into the queue when space is available.
+    /// Returns `true` while a block is still stashed (i.e. the host should
+    /// keep seeing `dfuDNBUSY`).
+    ///
+    /// This is the only function that ever signals EOF to the sink: once the
+    /// holding area is empty during manifestation, there is nothing left to
+    /// send, so the sink is closed. Safe to call repeatedly; `SwupdateSession::eof`
+    /// is itself idempotent.
+    async fn push_pending(&mut self) -> io::Result<bool> {
+        if let Some(chunk) = self.pending.take() {
+            match self.sink.as_mut() {
+                Some(sink) => match sink.try_send(chunk).await? {
+                    Feed::Ok(_) | Feed::Closed => {}
+                    Feed::Full(chunk) => {
+                        self.pending = Some(chunk);
+                        return Ok(true);
+                    }
+                },
+                None => {
+                    self.pending = Some(chunk);
+                    return Ok(true);
+                }
             }
-            Feed::Closed => Ok(()),
         }
-    }
 
-    async fn download_is_busy(&mut self) -> bool {
-        self.flush_pending().await.unwrap_or(false)
+        if self.state == State::Manifest
+            && let Some(sink) = self.sink.as_mut()
+        {
+            sink.eof();
+        }
+        Ok(false)
     }
 
     /// Receives a `DFU_DNLOAD` data block straight into a recycled buffer and
@@ -322,10 +359,9 @@ impl Dfu {
     /// tail is written to the front of the buffer, the USB data is read in
     /// directly after it, and the same buffer is reused as the outgoing chunk.
     pub(crate) async fn receive_dnload_block(&mut self, req: CtrlReceiver<'_>) -> io::Result<()> {
-        self.poll_download_progress().await?;
-        self.poll_manifest().await;
+        self.poll().await?;
 
-        if self.is_finishing() || self.sink.is_none() {
+        if self.is_finishing() {
             return Err(io::Error::other("manifestation in progress"));
         }
 
@@ -352,64 +388,44 @@ impl Dfu {
         self.download_tail.extend_from_slice(&buf[flush..]);
         buf.truncate(flush);
         self.download_crc.update(&buf);
-        self.enqueue_chunk(buf).await
+        self.submit_chunk(buf).await
     }
 
-    async fn poll_download_progress(&mut self) -> io::Result<()> {
-        if let Err(err) = self.flush_pending().await
-            && self.state != State::Manifest
-        {
-            return Err(io::Error::other(err));
-        }
+    /// Pushes any held block into the queue and observes swupdate's verdict,
+    /// whichever phase of the transfer we're in. A failure can be reported at
+    /// any time -- mid-download or during manifestation -- so both are
+    /// checked here together instead of two separate polling paths. Early
+    /// *success* is cached by the session and only acted on once
+    /// manifestation is actually reached, since the host keeps sending the
+    /// whole file regardless.
+    async fn poll(&mut self) -> io::Result<()> {
+        let _ = self.push_pending().await?;
 
-        // A swupdate failure is reported immediately: dfu-util polls GETSTATUS,
-        // so faulting here makes it exit non-zero even mid-download. Early
-        // *success* is cached (in the session) and only acted on at
-        // manifestation, since the host keeps sending the whole file.
-        if !self.is_finishing() {
-            let failed = match self.sink.as_mut() {
-                Some(sink) if sink.is_open() => sink.try_finished().and_then(Result::err),
-                _ => None,
-            };
-            if let Some(err) = failed {
-                log::error!("swupdate failed during download: {err}");
-                self.fault(Status::ErrVerify);
-            }
-        }
-        Ok(())
-    }
-
-    /// Checks whether the asynchronous manifestation task finished, then folds
-    /// its outcome back into the DFU state machine.
-    async fn poll_manifest(&mut self) {
-        if self.state != State::Manifest {
-            return;
-        }
-
-        let complete = match self.sink.as_mut() {
-            Some(sink) => sink.try_finished(),
-            None => return,
+        let manifesting = self.state == State::Manifest;
+        let result = match self.sink.as_mut() {
+            Some(sink) if manifesting || sink.is_open() => sink.try_finished(),
+            _ => None,
         };
 
-        match complete {
-            Some(Ok(())) => {
+        match result {
+            Some(Err(err)) => {
+                log::error!("swupdate failed: {err}");
+                self.download_crc = Hasher::new();
+                self.sink = Some(SwupdateSession::new(self.download.clone(), self.transfer_size as usize));
+                self.pending = None;
+                self.fault(Status::ErrVerify);
+            }
+            Some(Ok(())) if manifesting => {
                 self.download_crc = Hasher::new();
                 self.sink = Some(SwupdateSession::new(self.download.clone(), self.transfer_size as usize));
                 self.pending = None;
                 self.status = Status::Ok;
                 self.state = State::ManifestSync;
             }
-            None => {}
-            Some(Err(err)) => {
-                self.download_crc = Hasher::new();
-                self.sink = Some(SwupdateSession::new(self.download.clone(), self.transfer_size as usize));
-                self.pending = None;
-                log::error!("manifestation failed: {err}");
-                self.fault(Status::ErrVerify);
-            }
+            _ => {}
         }
+        Ok(())
     }
-
 }
 
 fn recycled_chunk_buffer(sink: &mut SwupdateSession, data: &[u8]) -> BytesMut {

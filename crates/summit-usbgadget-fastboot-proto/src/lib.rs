@@ -11,26 +11,31 @@
 
 use summit_usbgadget_swupdate::sysinfo::SystemInfo;
 
-/// Reply token: the requested command completed successfully.
-pub const OKAY: &[u8] = b"OKAY";
-/// Reply token: the reported download size did not match the bytes received.
-pub const FAIL_BADSIZE: &[u8] = b"FAILbad size";
-/// Reply token: closing / finishing the download failed.
-pub const FAIL_CLOSE: &[u8] = b"FAILclose";
-/// Reply token: the command was not recognized.
-pub const FAIL_CMD: &[u8] = b"FAILunknown command";
-/// Reply token: writing the payload to the sink failed.
-pub const FAIL_EPIPE: &[u8] = b"FAILwrite failed";
-/// Reply token: a flash was requested before any download.
-pub const FAIL_FLASH: &[u8] = b"FAILflash before download";
-/// Reply token: no download session is open.
-pub const FAIL_NOTOPEN: &[u8] = b"FAILnot open";
-/// Reply token: opening the download session failed.
-pub const FAIL_OPEN: &[u8] = b"FAILopen failed";
-/// Reply token: the requested partition is unknown.
-pub const FAIL_UNKNOWN_PART: &[u8] = b"FAILpartition does not exist";
-/// Info token: the device is waiting for SWUpdate to finish installing.
-pub const INFO_WAIT_SWUPDATE: &[u8] = b"INFOwaiting for SWUpdate";
+/// Fixed reply / info tokens shared by every fastboot transport. Grouped into
+/// one module so callers can `use fastboot_proto::reply::*;` instead of
+/// naming each token individually.
+pub mod reply {
+    /// Reply token: the requested command completed successfully.
+    pub const OKAY: &[u8] = b"OKAY";
+    /// Reply token: the reported download size did not match the bytes received.
+    pub const FAIL_BADSIZE: &[u8] = b"FAILbad size";
+    /// Reply token: closing / finishing the download failed.
+    pub const FAIL_CLOSE: &[u8] = b"FAILclose";
+    /// Reply token: the command was not recognized.
+    pub const FAIL_CMD: &[u8] = b"FAILunknown command";
+    /// Reply token: writing the payload to the sink failed.
+    pub const FAIL_EPIPE: &[u8] = b"FAILwrite failed";
+    /// Reply token: a flash was requested before any download.
+    pub const FAIL_FLASH: &[u8] = b"FAILflash before download";
+    /// Reply token: no download session is open.
+    pub const FAIL_NOTOPEN: &[u8] = b"FAILnot open";
+    /// Reply token: opening the download session failed.
+    pub const FAIL_OPEN: &[u8] = b"FAILopen failed";
+    /// Reply token: the requested partition is unknown.
+    pub const FAIL_UNKNOWN_PART: &[u8] = b"FAILpartition does not exist";
+    /// Info token: the device is waiting for SWUpdate to finish installing.
+    pub const INFO_WAIT_SWUPDATE: &[u8] = b"INFOwaiting for SWUpdate";
+}
 
 /// Whether a `download:` request was issued as a fastboot (`download:%`) or a
 /// plain FBK (`download:`) transfer.

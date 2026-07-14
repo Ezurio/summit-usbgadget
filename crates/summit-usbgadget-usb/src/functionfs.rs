@@ -10,17 +10,42 @@
 
 use std::io;
 use std::os::fd::RawFd;
+use std::time::Duration;
 
 use tokio::io::{unix::AsyncFd, Interest};
+use tokio::time::timeout;
 use usb_gadget::function::custom::{Custom, Event};
 
-/// Returns `true` when an error means the FunctionFS transport was torn down
-/// (endpoint disabled, gadget unbound), so the caller should stop rather than
-/// treat it as a hard failure.
-pub fn is_closed_transport_error(err: &io::Error) -> bool {
+/// Returns `true` when an error means the FunctionFS transport was permanently
+/// torn down (endpoint disabled, gadget unbound), so the caller should stop
+/// rather than retry.
+///
+/// Deliberately does **not** include `EIDRM`: see [`is_setup_superseded_error`].
+fn is_torn_down_transport_error(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::NotConnected
-        || err.raw_os_error() == Some(rustix::io::Errno::IDRM.raw_os_error())
+        || err.kind() == io::ErrorKind::BrokenPipe
         || err.raw_os_error() == Some(rustix::io::Errno::SHUTDOWN.raw_os_error())
+}
+
+/// Returns `true` when an error means the host superseded the control request
+/// we were servicing with a newer `SETUP` packet before we replied to it (e.g.
+/// after a stall-and-retry).
+///
+/// FunctionFS's ep0 reports this as `EIDRM` (see `ffs_ep0_read`/`ffs_ep0_write`
+/// in the kernel's `f_fs.c`: both check `ffs_setup_state_clear_cancelled()`
+/// before anything else, and it applies to *every* read/write on ep0 --
+/// including the read used to fetch the next event). It is a normal,
+/// recoverable occurrence, not a sign the transport is gone, so it must never
+/// be treated the same as [`is_torn_down_transport_error`].
+fn is_setup_superseded_error(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(rustix::io::Errno::IDRM.raw_os_error())
+}
+
+/// Returns `true` when an error means the current control request was
+/// cancelled or the FunctionFS transport was torn down, so the caller should
+/// give up on this request/transfer without treating it as a hard failure.
+pub fn is_closed_transport_error(err: &io::Error) -> bool {
+    is_torn_down_transport_error(err) || is_setup_superseded_error(err)
 }
 
 /// Control-event source for one bound custom function.
@@ -60,6 +85,17 @@ impl<'c> Ep0Events<'c> {
 #[allow(async_fn_in_trait)]
 pub trait EventHandler {
     async fn handle_event(&mut self, udc_name: &str, event: Event<'_>) -> io::Result<()>;
+
+    /// Idle timeout applied to the *next* `events.next()` wait; `None` (the
+    /// default) waits indefinitely. Re-evaluated every loop iteration, so a
+    /// handler turns this on/off simply by deriving it from its own state
+    /// (e.g. only while a transfer is in progress).
+    fn idle_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Called when `idle_timeout` elapses with no event. Default: no-op.
+    async fn on_idle_timeout(&mut self, _udc_name: &str) {}
 }
 
 /// Runs the shared endpoint-zero event loop until the endpoint is torn down,
@@ -81,7 +117,13 @@ where
         }
     };
     loop {
-        match events.next().await {
+        let step = match handler.idle_timeout() {
+            Some(limit) => timeout(limit, events.next())
+                .await
+                .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "endpoint zero idle"))),
+            None => events.next().await,
+        };
+        match step {
             Ok(event) => {
                 if let Err(err) = handler.handle_event(&udc_name, event).await {
                     if is_closed_transport_error(&err) {
@@ -93,9 +135,19 @@ where
             }
             // Endpoint zero is gone (gadget unbound / function torn down): stop
             // the loop so the task ends deterministically instead of spinning.
-            Err(err) if is_closed_transport_error(&err) => {
+            Err(err) if is_torn_down_transport_error(&err) => {
                 log::info!("[{udc_name}] {label} endpoint zero closed, stopping");
                 return;
+            }
+            // The setup we were about to fetch details for was superseded by a
+            // newer one (e.g. the host stalled and retried): retry rather than
+            // stopping, the next iteration will read the new event.
+            Err(err) if is_setup_superseded_error(&err) => {
+                log::debug!("[{udc_name}] {label} setup request superseded, retrying: {err}");
+            }
+            Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+                log::warn!("[{udc_name}] {label} idle timeout");
+                handler.on_idle_timeout(&udc_name).await;
             }
             Err(err) => log::debug!("[{udc_name}] {label} event error: {err}"),
         }

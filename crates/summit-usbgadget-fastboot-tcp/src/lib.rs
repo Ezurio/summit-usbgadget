@@ -49,6 +49,8 @@ pub struct FastbootTcpConfig {
     pub accept_timeout_secs: Option<u64>,
     /// Idle timeout (seconds) for an established connection; `0` disables it.
     pub inactivity_timeout_secs: u64,
+    /// Grace period (seconds) allowed for the connection shutdown handshake.
+    pub shutdown_timeout_secs: u64,
     /// Serial number advertised to fastboot hosts.
     pub serial: String,
     /// SWUpdate download parameters shared with the fastboot-usb schema.
@@ -62,6 +64,7 @@ impl Default for FastbootTcpConfig {
             address: "0.0.0.0:5554".to_string(),
             accept_timeout_secs: None,
             inactivity_timeout_secs: 30,
+            shutdown_timeout_secs: 15,
             serial: DEFAULT_SERIAL.to_string(),
             swupdate: SwupdateConfig::default(),
         }
@@ -88,6 +91,10 @@ impl FastbootTcpConfig {
             secs => Some(Duration::from_secs(secs)),
         }
     }
+
+    fn shutdown_timeout(&self) -> Duration {
+        Duration::from_secs(self.shutdown_timeout_secs)
+    }
 }
 
 /// Runs the fastboot-over-TCP service: loads `[fastboot_tcp]` from `config_path`
@@ -109,14 +116,18 @@ pub async fn run(
 summit_usbgadget_config::declare_service!("fastboot-tcp" => run);
 
 async fn serve(config: &FastbootTcpConfig, params: SwupdateParams) -> io::Result<()> {
-    let listener = TcpListener::bind(&config.address).await?;
-    log::info!("fastboot-tcp listening on {}", config.address);
-
-    let serial = config.serial.clone();
     let accept_timeout = config.accept_timeout();
     let inactivity_timeout = config.inactivity_timeout();
 
     loop {
+        // Listen, accept exactly one client, then drop the listener so the port
+        // is closed while we serve. Any other client is refused by the kernel
+        // (connection refused) — one update at a time, no bookkeeping. Re-bind
+        // for the next client once the session ends. Matches the socket-update
+        // transport's own listener loop.
+        let listener = TcpListener::bind(&config.address).await?;
+        log::info!("fastboot-tcp listening on {}", config.address);
+
         let (stream, peer) = match accept_timeout {
             Some(t) => match timeout(t, listener.accept()).await {
                 Ok(res) => res?,
@@ -127,6 +138,7 @@ async fn serve(config: &FastbootTcpConfig, params: SwupdateParams) -> io::Result
             },
             None => listener.accept().await?,
         };
+        drop(listener);
 
         let _ = stream.set_nodelay(true);
         let peer = peer.to_string();
@@ -134,14 +146,12 @@ async fn serve(config: &FastbootTcpConfig, params: SwupdateParams) -> io::Result
 
         // Fastboot is host-driven and single-session; serve one client at a time
         // so at most one SWUpdate transfer is ever in flight.
-        let session = TcpFastbootSession::new(
-            FastbootFraming::new(stream, inactivity_timeout),
-            params.clone(),
-            serial.clone(),
-            peer.clone(),
-        );
+        let session = TcpFastbootSession::new(FastbootFraming::new(stream, inactivity_timeout), config, params.clone(), peer.clone());
         if let Err(err) = session.run().await {
             log::error!("fastboot-tcp session {peer} failed: {err}");
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

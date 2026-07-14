@@ -83,10 +83,7 @@ const RECV_BUFFER_SIZE: usize = 16 * 1024;
 /// queue.
 const RECV_QUEUE_DEPTH: usize = 1;
 const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) use summit_usbgadget_fastboot_proto::{
-    FAIL_BADSIZE, FAIL_CLOSE, FAIL_CMD, FAIL_EPIPE, FAIL_FLASH, FAIL_NOTOPEN, FAIL_OPEN,
-    FAIL_UNKNOWN_PART, INFO_WAIT_SWUPDATE, OKAY,
-};
+pub(crate) use summit_usbgadget_fastboot_proto::reply::*;
 
 #[derive(Debug)]
 pub struct FastbootUsbRuntime {

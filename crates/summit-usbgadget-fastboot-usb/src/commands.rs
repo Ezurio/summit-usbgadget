@@ -27,7 +27,7 @@ async fn begin_download_command(state: &mut FastbootUsbState, udc_name: &str, la
         return false;
     };
 
-    if let Err(err) = download.open().await {
+    if let Err(err) = download.open() {
         log::error!("[{udc_name}] {label} begin failed: {err}");
         let _ = send_static(&mut state.tx, FAIL_OPEN).await;
         return false;

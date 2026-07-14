@@ -75,7 +75,7 @@ async fn get_status_reports_dnbusy_when_buffer_limit_is_reached() {
     dfu.sink = None;
     dfu.state = State::DnloadSync;
     dfu.status = Status::Ok;
-    assert_eq!(dfu.get_status().await.as_slice()[4], State::DnloadIdle as u8);
+    assert_eq!(dfu.get_status().as_slice()[4], State::DnloadIdle as u8);
 }
 
 #[tokio::test]
@@ -84,7 +84,7 @@ async fn get_status_reports_configured_poll_timeout_while_busy() {
     dfu.state = State::DnBusy;
     dfu.status = Status::Ok;
 
-    let status = dfu.get_status().await;
+    let status = dfu.get_status();
 
     assert_eq!(status.as_slice()[1], 10);
     assert_eq!(status.as_slice()[2], 0);
