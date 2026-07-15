@@ -107,6 +107,13 @@ and the binary was built with TLS support — the listener serves TLS; otherwise
 accepts plain TCP. It accepts one incoming update stream at a time and forwards
 it into SWUpdate.
 
+Without TLS configured, stream an SWU straight into the listener (default
+`address` is `0.0.0.0:9000`) with `nc`:
+
+```sh
+nc -N <device-ip> 9000 < firmware.swu
+```
+
 ### Fastboot over TCP
 
 The daemon can also serve the same fastboot flow as the USB `fastboot-usb` function over
@@ -389,12 +396,41 @@ decision (the user has no choice), determined by running `boot-rootfs.sh`
 
 ## Layout
 
-- [src/main.rs](src/main.rs) — loads the configuration, discovers controllers
-  via udev, binds a gadget per controller, and runs a DFU task for each.
-- [src/config.rs](src/config.rs) — the TOML configuration schema.
-- [src/sysinfo/](src/sysinfo) — boot context, serial derivation, and system-information retrieval.
-- [src/udc.rs](src/udc.rs) — udev-based controller discovery and selection.
-- [src/gadget.rs](src/gadget.rs) — builds and binds a composite gadget on a UDC.
-- [src/dfu/](src/dfu) — the DFU 1.1 protocol module: state/status enumerations,
-  configuration, firmware sinks (SWUpdate IPC or file), and the handler.
-- [src/swupdate/](src/swupdate) — update transport dispatch with local SWUpdate IPC/pipe and remote socket backends.
+The application is split into a thin top-level crate plus a set of plugin
+crates in `crates/`, each registering itself as a startup [`Service`] with
+`summit-usbgadget-config`. [build.rs](build.rs) reads the plugin list from
+`Cargo.toml`'s `[package.metadata.summit-usbgadget]` and generates
+`extern crate` links for whichever plugin crates are enabled by cargo features,
+so [src/main.rs](src/main.rs) can start every compiled-in service without
+knowing which ones exist.
+
+- [src/main.rs](src/main.rs) — entrypoint: sets up logging, primes the
+  boot-info cache, and runs every registered service.
+- [src/lib.rs](src/lib.rs) — links the enabled plugin crates and re-exports
+  the shared configuration subsystem.
+- [build.rs](build.rs) — generates the plugin-linking code from crate metadata.
+- [crates/summit-usbgadget-config/](crates/summit-usbgadget-config) — shared
+  TOML configuration loading and the startup service registry used by every
+  other crate.
+- [crates/summit-usbgadget-usb/](crates/summit-usbgadget-usb) — the composite
+  USB gadget service: udev-based controller discovery (`udc.rs`), gadget
+  binding (`gadget.rs`), the shared USB function-registration registry
+  (`registry.rs`), and `sysinfo/`.
+- [crates/summit-usbgadget-dfu/](crates/summit-usbgadget-dfu) — the DFU 1.1
+  protocol implementation, registered as a USB gadget function.
+- [crates/summit-usbgadget-fastboot-usb/](crates/summit-usbgadget-fastboot-usb) —
+  the fastboot-usb-compatible custom USB gadget function.
+- [crates/summit-usbgadget-fastboot-proto/](crates/summit-usbgadget-fastboot-proto) —
+  transport-agnostic fastboot/FBK wire-protocol helpers shared by the USB and
+  TCP fastboot transports.
+- [crates/summit-usbgadget-fastboot-tcp/](crates/summit-usbgadget-fastboot-tcp) —
+  the fastboot-over-TCP startup service.
+- [crates/summit-usbgadget-socket-update/](crates/summit-usbgadget-socket-update) —
+  the plain TCP / TLS socket SWUpdate source startup service.
+- [crates/summit-usbgadget-swupdate/](crates/summit-usbgadget-swupdate) —
+  the SWUpdate firmware sink (IPC, pipe, and streaming backends) and
+  `sysinfo/` boot-context / system-information retrieval, shared by the DFU
+  and fastboot functions.
+- [crates/swupdate-ipc/](crates/swupdate-ipc) — a pure-Rust client for the
+  SWUpdate IPC and progress protocols (blocking and async APIs), with no
+  dependency on `libswupdate.so`.

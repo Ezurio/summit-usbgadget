@@ -118,16 +118,40 @@ impl RunningGadget {
 
     async fn shutdown(mut self) {
         // Unbind from the UDC before touching tasks.  On ARM platforms using
-        // the ci_hdrc USB controller, calling io_cancel while a bulk-OUT DMA
-        // transfer is in flight triggers a kernel crash:
+        // the ci_hdrc USB controller, calling io_cancel (or dropping an AIO
+        // context, which does the same thing via io_destroy) while a
+        // bulk-OUT DMA transfer is in flight triggers a kernel crash:
         //   ffs_aio_cancel → ep_dequeue [ci_hdrc] → usb_gadget_unmap_request
         //   → dma_direct_unmap_sg → dcache_inval_poc (fault)
+        // Confirmed on real hardware: reversing this order (cancel/abort
+        // tasks first, unbind after) crashed the kernel. Do not reorder this
+        // again without a real fix for whatever made `bind(None)` hang below.
         //
         // Writing "\n" to the UDC configfs file is a synchronous kernel call
         // that stops the controller and completes (with error) every pending
         // FunctionFS AIO request before returning.  After that, io_cancel
         // finds no in-flight operation and returns EINVAL without touching DMA.
-        if let Err(err) = self._reg.bind(None) {
+        //
+        // This process runs a single-threaded (`current_thread`) tokio
+        // runtime (`src/main.rs`), so a blocking call made directly here --
+        // as opposed to via `spawn_blocking` -- would freeze the *entire*
+        // process for as long as it takes: no other task (crucially,
+        // including every FunctionFS task this same `shutdown()` is about to
+        // wait on below, which are relied on to notice the forced teardown
+        // and exit on their own) can be scheduled at all while the one OS
+        // thread driving the runtime is stuck in this syscall. Run it on the
+        // blocking pool instead, exactly like `bind_one` already does for
+        // `build_on_udc`, so those tasks can keep making progress no matter
+        // how long the kernel takes to complete the disable.
+        let reg = self._reg;
+        let (reg, bind_result) = tokio::task::spawn_blocking(move || {
+            let result = reg.bind(None);
+            (reg, result)
+        })
+        .await
+        .expect("bind(None) task panicked");
+        self._reg = reg;
+        if let Err(err) = bind_result {
             log::warn!("failed to unbind gadget from UDC before task shutdown: {err}");
         }
 

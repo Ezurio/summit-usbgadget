@@ -91,6 +91,7 @@ impl FastbootUsbState {
             downloaded_size: 0,
             fastboot_pending_flash: false,
             finish_pending: false,
+            gadget_torn_down: false,
         }
     }
 
@@ -197,6 +198,17 @@ impl FastbootUsbState {
                 return; // control loop ended
             }
             self.serve_connected(udc_name, &mut enabled).await;
+            if self.gadget_torn_down {
+                // The endpoint is permanently gone (UDC unbind in progress),
+                // not merely disabled pending a reconnect: re-checking `enabled`
+                // would just observe a stale `true` left over from before
+                // shutdown and immediately re-enter `serve_connected`, which
+                // would submit yet another read into a driver that is actively
+                // disabling the endpoint -- see `gadget_torn_down`'s doc comment
+                // for why that hangs `RunningGadget::shutdown`. Stop this task
+                // outright instead.
+                return;
+            }
         }
     }
 
@@ -237,6 +249,13 @@ impl FastbootUsbState {
             // block (or an install verdict) is actually available to await;
             // otherwise the transfer arm would spin on an empty queue.
             self.submit_recv(udc_name);
+            if self.gadget_torn_down {
+                // submit_recv just saw the UDC being unbound: return immediately
+                // rather than falling into the select, which would otherwise sit
+                // parked on `enabled.changed()` (harmless, but pointless) until
+                // the control loop separately notices the same teardown.
+                return;
+            }
             let ready = !self.rx.is_empty() || self.finish_pending;
 
             tokio::select! {
@@ -322,7 +341,18 @@ impl FastbootUsbState {
         let buf = self.recv_buffer();
         match self.rx.try_recv(buf) {
             Ok(_) => {}
-            Err(err) if is_closed_transport_error(&err) => {}
+            // Any closed-transport condition (`ENOTCONN`/`ESHUTDOWN`/`BrokenPipe`,
+            // or ci_hdrc's unbind-time `EINTR`) means the endpoint is gone, so
+            // submitting a *new* read here is never safe: see `gadget_torn_down`'s
+            // doc comment for why a fresh read submitted while the driver is
+            // disabling the endpoint can hang `RunningGadget::shutdown`
+            // indefinitely. Set the flag unconditionally rather than only for
+            // `EINTR` -- there's no scenario on a *bulk* endpoint where
+            // continuing to resubmit after any of these is useful.
+            Err(err) if is_closed_transport_error(&err) => {
+                log::debug!("[{udc_name}] fastboot-usb bulk endpoint closed, no longer submitting reads: {err}");
+                self.gadget_torn_down = true;
+            }
             Err(err) => log::debug!("[{udc_name}] fastboot-usb submit read error: {err}"),
         }
     }
@@ -357,16 +387,27 @@ impl FastbootUsbState {
                     true
                 }
             }
+            // Any closed-transport condition (`ENOTCONN`/`ESHUTDOWN`/`BrokenPipe`,
+            // ci_hdrc's unbind-time `EINTR`, or an ep0-style superseded-setup
+            // `EIDRM` even though that shouldn't occur on a bulk completion in
+            // practice) means this endpoint is gone for good: mark
+            // `gadget_torn_down` unconditionally (see its doc comment for why
+            // letting the loop submit further reads here can hang
+            // `RunningGadget::shutdown` indefinitely) and reset/stop
+            // regardless of `in_flight()` -- continuing to "keep serving" when
+            // idle would just let the next `submit_recv` resubmit a fresh read
+            // into a dead/dying endpoint.
             Err(err) if is_closed_transport_error(&err) => {
                 if self.in_flight() {
                     log::warn!(
                         "[{udc_name}] aborting in-flight fastboot-usb/fastboot download: bulk OUT transport closed while waiting for receive completion: {err}"
                     );
-                    self.reset(udc_name, None).await;
-                    false
                 } else {
-                    true
+                    log::debug!("[{udc_name}] fastboot-usb bulk endpoint closed: {err}");
                 }
+                self.gadget_torn_down = true;
+                self.reset(udc_name, None).await;
+                false
             }
             Err(err) => {
                 // Not a recognized retryable condition (e.g. a bad-CRC style

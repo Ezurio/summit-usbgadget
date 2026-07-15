@@ -115,6 +115,21 @@ struct FastbootUsbState {
     downloaded_size: usize,
     fastboot_pending_flash: bool,
     finish_pending: bool,
+    /// Set once a bulk-OUT operation sees a closed-transport error
+    /// (`is_closed_transport_error`: `ENOTCONN`/`ESHUTDOWN`/`BrokenPipe`, or
+    /// ci_hdrc's unbind-time `EINTR`), which means the endpoint is gone for
+    /// good (`RunningGadget::shutdown` in `summit-usbgadget-usb/src/gadget.rs`
+    /// writes `\n` to the UDC configfs file synchronously, which blocks until
+    /// the driver disables the endpoint and force-completes every pending
+    /// request). Submitting *further* reads here is actively harmful: a read
+    /// queued while the driver is mid-disable can prevent that disable's
+    /// request-queue drain from ever completing, hanging the unbind
+    /// indefinitely. So this is a one-way, unrecoverable signal — never
+    /// cleared by `reset_state()` — that permanently stops both `submit_recv`
+    /// and `data_loop` from ever touching the endpoint again for this
+    /// instance, regardless of which specific closed-transport error tripped
+    /// it.
+    gadget_torn_down: bool,
 }
 
 pub fn build(cfg: &FastbootUsbFnConfig, serial: &str) -> Result<(Handle, FastbootUsbRuntime), SwupdateConfigError> {

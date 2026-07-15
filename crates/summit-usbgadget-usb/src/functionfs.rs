@@ -41,11 +41,32 @@ fn is_setup_superseded_error(err: &io::Error) -> bool {
     err.raw_os_error() == Some(rustix::io::Errno::IDRM.raw_os_error())
 }
 
+/// Returns `true` when a blocking ep0 control transfer was interrupted by a
+/// Unix signal rather than by anything USB-related.
+///
+/// `CtrlReceiver::recv_async`/`CtrlSender::send_async` (vendored `usb-gadget`
+/// crate) run a plain blocking `read`/`write` on a `spawn_blocking` thread.
+/// `Shutdown::from_signals` (`summit-usbgadget-config`) handles `SIGINT`/
+/// `SIGTERM` via `tokio::signal`, but Unix signal delivery is process-wide:
+/// the signal can land on whichever thread hasn't blocked it, including a
+/// blocking-pool thread parked in that `read`/`write`, which then returns
+/// `EINTR`. This is expected exactly when a termination signal just fired
+/// (which is also what triggers `RunningGadget::shutdown`'s UDC unbind), not
+/// a sign of a corrupt transfer, so it must not be logged as a hard error --
+/// but it also does not by itself mean ep0 itself is gone, so (unlike
+/// [`is_torn_down_transport_error`]) it must never stop the outer `serve()`
+/// loop: the real teardown (`ENODEV`/`ESHUTDOWN`) follows a moment later once
+/// the unbind actually completes, and that is what stops the loop.
+fn is_signal_interrupted_error(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::Interrupted
+}
+
 /// Returns `true` when an error means the current control request was
-/// cancelled or the FunctionFS transport was torn down, so the caller should
-/// give up on this request/transfer without treating it as a hard failure.
+/// cancelled, interrupted, or the FunctionFS transport was torn down, so the
+/// caller should give up on this request/transfer without treating it as a
+/// hard failure.
 pub fn is_closed_transport_error(err: &io::Error) -> bool {
-    is_torn_down_transport_error(err) || is_setup_superseded_error(err)
+    is_torn_down_transport_error(err) || is_setup_superseded_error(err) || is_signal_interrupted_error(err)
 }
 
 /// Control-event source for one bound custom function.
