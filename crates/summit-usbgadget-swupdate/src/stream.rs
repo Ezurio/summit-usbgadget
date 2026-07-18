@@ -72,7 +72,7 @@ pub(crate) fn spawn(
     let (recycle_tx, recycle_rx) = mpsc::channel(capacity);
     let status = tokio::spawn(async move {
         let TransportSpec { writer, status } = connect.await?;
-        let _ = tokio::spawn(drain_data(writer, rx, recycle_tx));
+        drop(tokio::spawn(drain_data(writer, rx, recycle_tx)));
         status(params).await
     });
     Tasks { tx, recycle_rx, status }

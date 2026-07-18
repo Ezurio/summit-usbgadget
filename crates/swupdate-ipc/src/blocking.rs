@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::proto::{
-    IpcMessage, MsgType, ProgressConnectAck, ProgressMsg, RecoveryStatus, SwupdateRequest, write_c_string,
+    IpcMessage, MsgType, ProgressConnectAck, ProgressMsg, RecoveryStatus, SwupdateRequest,
 };
 use crate::socket::{ctrl_socket_path, progress_socket_path};
+use crate::{InstallRequest, InstallStatus};
 
 const PROGRESS_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRESS_RECONNECT_DELAY: Duration = Duration::from_millis(500);
@@ -87,11 +88,23 @@ impl Write for InstallConn {
 /// the image stream.
 pub fn inst_start_ext(req: &SwupdateRequest) -> Result<InstallConn> {
     let mut stream = connect_ctrl()?;
-    let mut msg = IpcMessage::new(MsgType::ReqInstall);
-    msg.data.instmsg.req = *req;
+    let mut msg = IpcMessage::new(MsgType::REQ_INSTALL);
+    msg.set_install_request(*req);
     write_message(&mut stream, &msg)?;
     let reply = read_message(&mut stream)?;
-    if reply.type_ != MsgType::Ack as i32 {
+    if !reply.has_type(MsgType::ACK) {
+        return Err(Error::Nack);
+    }
+    Ok(InstallConn { stream })
+}
+
+/// Starts an install from native Rust parameters.
+pub fn inst_start_request(request: &InstallRequest) -> Result<InstallConn> {
+    let message = request.encode()?;
+    let mut stream = connect_ctrl()?;
+    write_message(&mut stream, &message)?;
+    let reply = read_message(&mut stream)?;
+    if !reply.has_type(MsgType::ACK) {
         return Err(Error::Nack);
     }
     Ok(InstallConn { stream })
@@ -106,7 +119,7 @@ pub fn inst_start() -> Result<InstallConn> {
 /// Queries the current installer status, equivalent to `ipc_get_status`.
 pub fn get_status() -> Result<IpcMessage> {
     let mut stream = connect_ctrl()?;
-    let request = IpcMessage::new(MsgType::GetStatus);
+    let request = IpcMessage::new(MsgType::GET_STATUS);
     write_message(&mut stream, &request)?;
     read_message(&mut stream)
 }
@@ -115,13 +128,16 @@ pub fn get_status() -> Result<IpcMessage> {
 /// `ipc_get_status_timeout`. Returns `Ok(None)` when the timeout elapses.
 pub fn get_status_timeout(timeout: Duration) -> Result<Option<IpcMessage>> {
     let mut stream = connect_ctrl()?;
-    let request = IpcMessage::new(MsgType::GetStatus);
+    let request = IpcMessage::new(MsgType::GET_STATUS);
     write_message(&mut stream, &request)?;
     stream.set_read_timeout(Some(timeout))?;
     match read_message(&mut stream) {
         Ok(msg) => Ok(Some(msg)),
         Err(Error::Io(e))
-            if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
         {
             Ok(None)
         }
@@ -156,11 +172,6 @@ pub fn await_install_result(timeout: Duration) -> Result<()> {
             Err(err) => return Err(err),
         };
 
-        // SAFETY: get_status replies always use the `status` union member.
-        let (current_raw, last_result_raw) = unsafe {
-            (msg.data.status.current, msg.data.status.last_result)
-        };
-
         // Both fields are the SAME enum (RECOVERY_STATUS) but carry DIFFERENT
         // information, and getting this wrong has broken install detection
         // repeatedly. From SWUpdate's GET_STATUS handler (core/network_thread.c):
@@ -183,14 +194,15 @@ pub fn await_install_result(timeout: Duration) -> Result<()> {
         // * Success is only trusted once `current` shows the install is actively
         //   running (RUN) AND `last_result` is SUCCESS, so a stale result from a
         //   previous install is never mistaken for this one.
-        let current = RecoveryStatus::try_from(current_raw).ok();
-        let last_result_now = RecoveryStatus::try_from(last_result_raw).ok();
+        let status = InstallStatus::decode(&msg);
 
-        if last_result_now == Some(RecoveryStatus::Failure) {
+        if status.last_result == Some(RecoveryStatus::FAILURE) {
             return Err(Error::InstallFailed);
         }
 
-        if current == Some(RecoveryStatus::Run) && last_result_now == Some(RecoveryStatus::Success) {
+        if status.current == Some(RecoveryStatus::RUN)
+            && status.last_result == Some(RecoveryStatus::SUCCESS)
+        {
             return Ok(());
         }
     }
@@ -201,14 +213,8 @@ pub fn await_install_result(timeout: Duration) -> Result<()> {
 /// reply frame.
 pub fn postupdate(info: &[u8]) -> Result<IpcMessage> {
     let mut stream = connect_ctrl()?;
-    let mut msg = IpcMessage::new(MsgType::PostUpdate);
-    unsafe {
-        let len = info.len().min(msg.data.procmsg.buf.len());
-        for (slot, &byte) in msg.data.procmsg.buf.iter_mut().zip(info.iter()).take(len) {
-            *slot = byte as std::ffi::c_char;
-        }
-        msg.data.procmsg.len = len as u32;
-    }
+    let mut msg = IpcMessage::new(MsgType::POST_UPDATE);
+    msg.set_postupdate_info(info);
     write_message(&mut stream, &msg)?;
     read_message(&mut stream)
 }
@@ -218,7 +224,7 @@ pub fn postupdate(info: &[u8]) -> Result<IpcMessage> {
 /// into `msg`.
 pub fn send_cmd(msg: &mut IpcMessage) -> Result<()> {
     let mut stream = connect_ctrl()?;
-    msg.magic = crate::proto::IPC_MAGIC;
+    msg.magic = crate::proto::IPC_MAGIC as i32;
     write_message(&mut stream, msg)?;
     *msg = read_message(&mut stream)?;
     Ok(())
@@ -228,13 +234,12 @@ pub fn send_cmd(msg: &mut IpcMessage) -> Result<()> {
 /// key must be 64 ASCII characters and the IV 32 ASCII characters.
 pub fn set_aes(key: &str, ivt: &str) -> Result<()> {
     if key.len() != 64 || ivt.len() != 32 {
-        return Err(Error::InvalidArgument("AES key must be 64 chars and IV 32 chars"));
+        return Err(Error::InvalidArgument(
+            "AES key must be 64 chars and IV 32 chars",
+        ));
     }
-    let mut msg = IpcMessage::new(MsgType::SetAesKey);
-    unsafe {
-        write_c_string(&mut msg.data.aeskeymsg.key_ascii, key);
-        write_c_string(&mut msg.data.aeskeymsg.ivt_ascii, ivt);
-    }
+    let mut msg = IpcMessage::new(MsgType::SET_AES_KEY);
+    msg.set_aes_key(key, ivt)?;
     send_cmd(&mut msg)
 }
 
@@ -245,18 +250,8 @@ pub fn set_version_range(
     max_version: Option<&str>,
     current_version: Option<&str>,
 ) -> Result<()> {
-    let mut msg = IpcMessage::new(MsgType::SetVersionsRange);
-    unsafe {
-        if let Some(v) = min_version {
-            write_c_string(&mut msg.data.versions.minimum_version, v);
-        }
-        if let Some(v) = max_version {
-            write_c_string(&mut msg.data.versions.maximum_version, v);
-        }
-        if let Some(v) = current_version {
-            write_c_string(&mut msg.data.versions.current_version, v);
-        }
-    }
+    let mut msg = IpcMessage::new(MsgType::SET_VERSIONS_RANGE);
+    msg.set_version_range(min_version, max_version, current_version)?;
     send_cmd(&mut msg)
 }
 
@@ -273,12 +268,17 @@ impl NotifyConn {
         let mut msg = IpcMessage::zeroed();
         match self.stream.read_exact(msg.as_bytes_mut()) {
             Ok(()) => {
-                if msg.magic != crate::proto::IPC_MAGIC {
+                if msg.magic != crate::proto::IPC_MAGIC as i32 {
                     return Err(Error::InvalidMagic(msg.magic));
                 }
                 Ok(Some(msg))
             }
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
                 Ok(None)
             }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Err(Error::Closed),
@@ -296,10 +296,10 @@ impl NotifyConn {
 /// Opens a notification stream, equivalent to `ipc_notify_connect`.
 pub fn notify_connect() -> Result<NotifyConn> {
     let mut stream = connect_ctrl()?;
-    let request = IpcMessage::new(MsgType::NotifyStream);
+    let request = IpcMessage::new(MsgType::NOTIFY_STREAM);
     write_message(&mut stream, &request)?;
     let reply = read_message(&mut stream)?;
-    if reply.type_ != MsgType::Ack as i32 {
+    if !reply.has_type(MsgType::ACK) {
         return Err(Error::UnexpectedType(reply.type_));
     }
     Ok(NotifyConn { stream })
@@ -332,7 +332,12 @@ impl ProgressConn {
         let mut msg = ProgressMsg::zeroed();
         match self.stream.read_exact(msg.as_bytes_mut()) {
             Ok(()) => Ok(Some(msg)),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
                 Ok(None)
             }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Err(Error::Closed),
@@ -421,8 +426,8 @@ where
 
         match conn.receive_nb() {
             Ok(Some(msg)) => match msg.status().ok() {
-                Some(RecoveryStatus::Success) => return Ok(()),
-                Some(RecoveryStatus::Failure) => return Err(Error::InstallFailed),
+                Some(RecoveryStatus::SUCCESS) => return Ok(()),
+                Some(RecoveryStatus::FAILURE) => return Err(Error::InstallFailed),
                 _ => on_progress(&msg),
             },
             Ok(None) => thread::sleep(STATUS_POLL_INTERVAL),
@@ -536,8 +541,8 @@ fn consume_progress(progress: &mut ProgressConn) -> Result<Option<AsyncOutcome>>
         match progress.receive_nb()? {
             None => return Ok(None),
             Some(msg) => match msg.status() {
-                Ok(RecoveryStatus::Success) => return Ok(Some(AsyncOutcome::Success)),
-                Ok(RecoveryStatus::Failure) => return Ok(Some(AsyncOutcome::Failure)),
+                Ok(RecoveryStatus::SUCCESS) => return Ok(Some(AsyncOutcome::Success)),
+                Ok(RecoveryStatus::FAILURE) => return Ok(Some(AsyncOutcome::Failure)),
                 _ => continue,
             },
         }
@@ -549,8 +554,8 @@ fn wait_for_complete(progress: &mut ProgressConn) -> AsyncOutcome {
     loop {
         match progress.receive() {
             Ok(msg) => match msg.status() {
-                Ok(RecoveryStatus::Success) => return AsyncOutcome::Success,
-                Ok(RecoveryStatus::Failure) => return AsyncOutcome::Failure,
+                Ok(RecoveryStatus::SUCCESS) => return AsyncOutcome::Success,
+                Ok(RecoveryStatus::FAILURE) => return AsyncOutcome::Failure,
                 _ => continue,
             },
             Err(_) => return AsyncOutcome::Failure,
@@ -567,16 +572,12 @@ where
     let mut previous: Option<i32> = None;
     let deadline = Instant::now() + Duration::from_secs(30);
     while let Ok(msg) = get_status() {
-        let (current, desc_len) = unsafe {
-            let status = &msg.data.status;
-            let desc_len = status.desc.iter().position(|&c| c == 0).unwrap_or(status.desc.len());
-            (status.current, desc_len)
-        };
-        if previous != Some(current) || desc_len > 0 {
+        let (current, description) = msg.install_status_description();
+        if previous != Some(current) || !description.is_empty() {
             callback(&msg);
         }
         previous = Some(current);
-        if current == RecoveryStatus::Idle as i32 || Instant::now() >= deadline {
+        if current == RecoveryStatus::IDLE as i32 || Instant::now() >= deadline {
             break;
         }
     }

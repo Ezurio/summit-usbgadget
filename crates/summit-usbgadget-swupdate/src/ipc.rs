@@ -11,7 +11,7 @@ use std::io;
 use rustix::io::Errno;
 use swupdate_ipc::Error as SwupdateError;
 use swupdate_ipc::r#async as swu;
-use swupdate_ipc::{RunType, SourceType, SwupdateRequest};
+use swupdate_ipc::{InstallMode, InstallRequest, InstallSource};
 
 use super::SwupdateParams;
 use crate::stream::TransportSpec;
@@ -33,18 +33,28 @@ pub(super) async fn begin(
     params: &SwupdateParams,
     running_mode: &str,
 ) -> io::Result<TransportSpec> {
-    let mut req = SwupdateRequest::prepare();
-    req.source = SourceType::Local as i32;
-    req.dry_run = if params.dry_run { RunType::DryRun as i32 } else { RunType::Install as i32 };
-    req.disable_store_swu = params.disable_store_swu;
+    let software_set = params
+        .software_set
+        .clone()
+        .unwrap_or_else(|| "stable".to_string());
+    let request = InstallRequest {
+        software_set,
+        running_mode: running_mode.to_owned(),
+        source: InstallSource::Local,
+        mode: if params.dry_run {
+            InstallMode::DryRun
+        } else {
+            InstallMode::Install
+        },
+        disable_store_swu: params.disable_store_swu,
+    };
+    log::info!(
+        "SWUpdate software_set={} running_mode={}",
+        request.software_set,
+        request.running_mode
+    );
 
-    let software_set = params.software_set.clone().unwrap_or_else(|| "stable".to_string());
-    req.set_software_set(&software_set);
-
-    req.set_running_mode(running_mode);
-    log::info!("SWUpdate software_set={software_set} running_mode={running_mode}");
-
-    let conn = swu::inst_start_ext(&req)
+    let conn = swu::inst_start_request(&request)
         .await
         .map_err(|e| io::Error::other(format!("SWUpdate inst_start failed: {e}")))?;
     log::info!("SWUpdate install started; streaming firmware");
@@ -53,27 +63,20 @@ pub(super) async fn begin(
     // socket) are independent; the progress watcher is the sole authority on the
     // result. The callback logs progress; the library owns connect/reconnect and
     // terminal-verdict detection.
-    Ok(TransportSpec::new(
-        Box::new(conn),
-        |params| Box::pin(async move {
+    Ok(TransportSpec::new(Box::new(conn), |params| {
+        Box::pin(async move {
             swu::await_progress_result_with(params.timeout, |msg| {
-                // `ProgressMsg` is `#[repr(C, packed)]`; copy fields to locals
-                // before formatting since `log::debug!` takes references.
-                let (cur_step, nsteps, cur_percent) = (msg.cur_step, msg.nsteps, msg.cur_percent);
-                let raw_status = msg.status;
                 log::debug!(
-                    "SWUpdate progress: status={:?}(raw={}) step {}/{} {} {}% info={}",
-                    msg.status(),
-                    raw_status,
-                    cur_step,
-                    nsteps,
+                    "SWUpdate progress: step {}/{} {} {}% info={}",
+                    msg.current_step(),
+                    msg.total_steps(),
                     msg.cur_image(),
-                    cur_percent,
+                    msg.current_percent(),
                     msg.info(),
                 );
             })
             .await
             .map_err(|err| normalize_ipc_error(err, "wait"))
-        }),
-    ))
+        })
+    }))
 }

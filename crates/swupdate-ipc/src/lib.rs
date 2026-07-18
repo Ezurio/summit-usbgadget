@@ -49,8 +49,8 @@
 //!
 //! fn software_update(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut req = SwupdateRequest::prepare();
-//!     req.source = SourceType::Local as i32;
-//!     req.dry_run = RunType::Install as i32;
+//!     req.source = SourceType::SOURCE_LOCAL;
+//!     req.dry_run = RunType::RUN_INSTALL;
 //!
 //!     let mut conn = blocking::inst_start_ext(&req)?;
 //!     let mut file = File::open(path)?;
@@ -84,8 +84,8 @@
 //!         println!("progress: {percent}% image={}", msg.cur_image());
 //!
 //!         match msg.status() {
-//!             Ok(RecoveryStatus::Success) => return Ok(()),
-//!             Ok(RecoveryStatus::Failure) => {
+//!             Ok(RecoveryStatus::SUCCESS) => return Ok(()),
+//!             Ok(RecoveryStatus::FAILURE) => {
 //!                 return Err("SWUpdate reported failure".into());
 //!             }
 //!             _ => {}
@@ -106,8 +106,8 @@
 //!
 //! async fn software_update_async(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut req = SwupdateRequest::prepare();
-//!     req.source = SourceType::Local as i32;
-//!     req.dry_run = RunType::Install as i32;
+//!     req.source = SourceType::SOURCE_LOCAL;
+//!     req.dry_run = RunType::RUN_INSTALL;
 //!
 //!     let mut conn = swu::inst_start_ext(&req).await?;
 //!     let mut file = tokio::fs::File::open(path).await?;
@@ -141,8 +141,8 @@
 //!         println!("progress: {percent}% image={}", msg.cur_image());
 //!
 //!         match msg.status() {
-//!             Ok(RecoveryStatus::Success) => return Ok(()),
-//!             Ok(RecoveryStatus::Failure) => {
+//!             Ok(RecoveryStatus::SUCCESS) => return Ok(()),
+//!             Ok(RecoveryStatus::FAILURE) => {
 //!                 return Err("SWUpdate reported failure".into());
 //!             }
 //!             _ => {}
@@ -151,6 +151,7 @@
 //! }
 //! ```
 
+pub mod codec;
 mod error;
 pub mod proto;
 mod socket;
@@ -161,9 +162,12 @@ pub mod blocking;
 #[path = "async_io.rs"]
 pub mod r#async;
 
+pub use codec::{InstallMode, InstallRequest, InstallSource, InstallStatus};
 pub use error::{Error, Result};
 pub use proto::{
     IPC_MAGIC, IpcMessage, MsgData, MsgType, PROGRESS_API_VERSION, ProgressConnectAck, ProgressMsg,
-    RecoveryStatus, RunType, SourceType, SubprocessCmd, SwupdateRequest,
+    RecoveryStatus, RunType, SourceType, SwupdateRequest, decode_recovery_status,
 };
-pub use socket::{ctrl_socket_path, progress_socket_path, SOCKET_CTRL_DEFAULT, SOCKET_PROGRESS_DEFAULT};
+pub use socket::{
+    SOCKET_CTRL_DEFAULT, SOCKET_PROGRESS_DEFAULT, ctrl_socket_path, progress_socket_path,
+};
