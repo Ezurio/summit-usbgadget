@@ -12,7 +12,7 @@ use tokio::time::sleep;
 
 use super::EffectiveUpdateType;
 
-const REBOOT_DELAY: Duration = Duration::from_secs(5);
+const REBOOT_DELAY: Duration = Duration::from_secs(2);
 static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn reject_if_restart_pending() -> io::Result<()> {

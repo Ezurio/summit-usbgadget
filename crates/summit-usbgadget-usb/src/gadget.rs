@@ -106,6 +106,12 @@ pub struct RunningGadget {
 }
 
 impl RunningGadget {
+    /// Name of the UDC this gadget is bound to (the gadget's configfs name,
+    /// which is set equal to the UDC name when it is built).
+    fn udc_name(&self) -> &OsStr {
+        self._reg.name()
+    }
+
     fn push_task(&mut self, task: JoinHandle<()>) {
         self.tasks.push(task);
     }
@@ -592,10 +598,14 @@ where
                         continue;
                     }
                 };
-                let Some(name) = udc_name_from_event(&event) else {
+                let Some((name, event_type)) = udc_name_from_event(&event) else {
                     continue;
                 };
-                bind_one(&config, &selection, &mut bound, &mut gadgets, name).await;
+                match event_type {
+                    EventType::Add => bind_one(&config, &selection, &mut bound, &mut gadgets, name).await,
+                    EventType::Remove => unbind_one(&mut bound, &mut gadgets, name).await,
+                    _ => {}
+                }
             }
         }
     }
@@ -622,12 +632,33 @@ async fn bind_existing(
     }
 }
 
-fn udc_name_from_event(event: &tokio_udev::Event) -> Option<OsString> {
-    if matches!(event.event_type(), EventType::Add) {
-        Some(event.sysname().to_os_string())
-    } else {
-        None
+fn udc_name_from_event(event: &tokio_udev::Event) -> Option<(OsString, EventType)> {
+    match event.event_type() {
+        event_type @ (EventType::Add | EventType::Remove) => Some((event.sysname().to_os_string(), event_type)),
+        _ => None,
     }
+}
+
+/// Tears down the gadget bound to controller `name` when its udev device is
+/// removed, and forgets it so a later `Add` for the same name rebuilds it from
+/// scratch.
+///
+/// Without this, a controller that disappears and reappears (module reload,
+/// core reset, ...) would be silently ignored forever: `Selection::wants`
+/// treats any name still in `bound` as already handled, so the stale
+/// `RunningGadget` -- and its by-then-dangling configfs registration -- would
+/// never be replaced, leaving the gadget permanently non-functional even
+/// though this process keeps running.
+async fn unbind_one(bound: &mut HashSet<OsString>, gadgets: &mut Vec<RunningGadget>, name: OsString) {
+    if !bound.remove(&name) {
+        return;
+    }
+    let Some(pos) = gadgets.iter().position(|gadget| gadget.udc_name() == name.as_os_str()) else {
+        log::warn!("UDC {} removed but no matching gadget was tracked", name.to_string_lossy());
+        return;
+    };
+    log::info!("UDC {} removed, tearing down its gadget", name.to_string_lossy());
+    gadgets.remove(pos).shutdown().await;
 }
 
 /// Builds and binds a gadget on controller `name` if the selection allows it.
