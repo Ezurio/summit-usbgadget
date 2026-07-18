@@ -57,12 +57,19 @@ pub(super) async fn begin(
         Box::new(conn),
         |params| Box::pin(async move {
             swu::await_progress_result_with(params.timeout, |msg| {
+                // `ProgressMsg` is `#[repr(C, packed)]`; copy fields to locals
+                // before formatting since `log::debug!` takes references.
+                let (cur_step, nsteps, cur_percent) = (msg.cur_step, msg.nsteps, msg.cur_percent);
+                let raw_status = msg.status;
                 log::debug!(
-                    "SWUpdate progress: step {}/{} {} {}%",
-                    msg.cur_step,
-                    msg.nsteps,
+                    "SWUpdate progress: status={:?}(raw={}) step {}/{} {} {}% info={}",
+                    msg.status(),
+                    raw_status,
+                    cur_step,
+                    nsteps,
                     msg.cur_image(),
-                    msg.cur_percent,
+                    cur_percent,
+                    msg.info(),
                 );
             })
             .await

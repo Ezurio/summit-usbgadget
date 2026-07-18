@@ -384,7 +384,17 @@ impl IpcMessage {
 }
 
 /// Progress notification frame (`struct progress_msg`).
-#[repr(C)]
+///
+/// SWUpdate declares this struct `__attribute__((packed))` in
+/// `progress_ipc.h`, so it must be `#[repr(C, packed)]` here too. Without
+/// `packed`, Rust inserts 4 bytes of padding before `dwl_bytes` (a `u64`
+/// needs 8-byte alignment after two `u32`s), shifting every field from
+/// `nsteps` onward by 4 bytes relative to what the daemon actually sends on
+/// the wire — silently corrupting `cur_step`, `cur_percent`, `cur_image`,
+/// `hnd_name`, `source`, `infolen`, and `info`, and hanging completion
+/// detection that depends on them. Do not drop `packed` when touching this
+/// struct.
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct ProgressMsg {
     /// Progress API version for compatibility checking.
@@ -522,7 +532,10 @@ pub fn read_c_string(src: &[c_char]) -> String {
 
 // Compile-time layout guarantees. Sizes that depend on `size_t` are checked
 // only on 64-bit targets; all sockets carry whatever the local ABI produces.
-const _: () = assert!(size_of::<ProgressMsg>() == 2416);
+// ProgressMsg is 2408 bytes (packed) for SWUpdate >= 2025.12; it was 2416
+// bytes (unpacked) on SWUpdate <= 2025.05. See the doc comment on
+// `ProgressMsg` before changing this.
+const _: () = assert!(size_of::<ProgressMsg>() == 2408);
 const _: () = assert!(size_of::<ProgressConnectAck>() == 8);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<SwupdateRequest>() == 1056);
