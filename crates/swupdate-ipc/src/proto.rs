@@ -4,22 +4,19 @@
 //
 //! Wire protocol types for the SWUpdate IPC interface.
 //!
-//! These are generated from SWUpdate's own C headers (`network_ipc.h`,
-//! `progress_ipc.h`, `swupdate_status.h`) by bindgen (see `build.rs`). The
-//! checked-in default bindings support builds without SWUpdate headers; setting
-//! `SWUPDATE_INCLUDE_DIR` regenerates them for the target daemon. This avoids
-//! hand-mirrored definitions, so the in-memory layout is byte-for-byte
-//! identical to the supported daemon ABI
-//! — including things like the `packed` attribute on `struct progress_msg`,
-//! which bindgen picks up automatically from the header instead of relying
-//! on a human to notice and copy it. (A hand-written `ProgressMsg` missing
-//! `#[repr(C, packed)]` previously corrupted progress/status parsing this
-//! way and hung completion detection.)
+//! These checked-in definitions match the SWUpdate C headers (`network_ipc.h`,
+//! `progress_ipc.h`, `swupdate_status.h`). `build.rs` detects the ProgressMsg
+//! layout from `SWUPDATE_INCLUDE_DIR/progress_ipc.h`.
+//! `SWUPDATE_PROGRESS_MSG_LAYOUT` can override this with `packed` (SWUpdate
+//! 2025.12 and newer) or `unpacked` (SWUpdate 2025.05 and older). When no
+//! header or override is available, it defaults to `packed`. The layout must be
+//! selected before reading the stream because both releases advertise progress
+//! API 2.0.0 despite using different frame sizes.
 //!
 //! # Safety note on enum-typed fields
 //!
-//! bindgen represents true C enums (`sourcetype`, `run_type`) as real Rust
-//! enums wherever the header uses them directly. Constructing one of these
+//! The definitions represent true C enums (`sourcetype`, `run_type`) as real
+//! Rust enums wherever the header uses them directly. Constructing one of these
 //! enums with a value outside its defined variants is undefined behavior.
 //! That's fine for [`SwupdateRequest`] fields, since we always fill those
 //! ourselves before sending. But [`IpcMessage`] is read wholesale off the
@@ -29,8 +26,8 @@
 //! `data.status` (plain `c_int`s) back out of a received [`IpcMessage`];
 //! don't read the enum-typed fields of `data.instmsg`/`data.procmsg`
 //! (`source`, `dry_run`) from a message that came off the wire.
-//! `progress_msg::status` avoids this entirely: bindgen represents it as a
-//! plain `u32`, not `RECOVERY_STATUS`, specifically because that field IS
+//! `progress_msg::status` avoids this entirely: it is represented as a plain
+//! `u32`, not `RECOVERY_STATUS`, specifically because that field IS
 //! populated from the wire; decode it with [`decode_recovery_status`].
 
 // Generated enum variants retain their C names to keep this crate's public
@@ -55,8 +52,8 @@ impl RecoveryStatus {
     }
 }
 
-/// Decodes a raw `progress_msg::status` value. bindgen leaves that field as
-/// a plain `u32` rather than `RECOVERY_STATUS` directly (see the
+/// Decodes a raw `progress_msg::status` value. The definition leaves that
+/// field as a plain `u32` rather than `RECOVERY_STATUS` directly (see the
 /// module-level safety note), since it's populated straight from the wire.
 pub fn decode_recovery_status(raw: u32) -> std::result::Result<RecoveryStatus, u32> {
     match raw {
@@ -317,13 +314,13 @@ pub fn read_c_string(src: &[c_char]) -> String {
     }
 }
 
-/// Views a bindgen C-character buffer as bytes without copying.
+/// Views a C-character buffer as bytes without copying.
 fn c_char_bytes(src: &[c_char]) -> &[u8] {
     // `c_char` is always a one-byte signed or unsigned integer type.
     unsafe { slice::from_raw_parts(src.as_ptr().cast(), src.len()) }
 }
 
-/// Views a mutable bindgen C-character buffer as bytes without copying.
+/// Views a mutable C-character buffer as bytes without copying.
 fn c_char_bytes_mut(dst: &mut [c_char]) -> &mut [u8] {
     // `c_char` is always a one-byte signed or unsigned integer type.
     unsafe { slice::from_raw_parts_mut(dst.as_mut_ptr().cast(), dst.len()) }

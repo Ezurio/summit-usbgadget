@@ -12,10 +12,10 @@
 //! Currently this library is geared toward use in Rust procedural macros, but
 //! contains some APIs that may be useful more generally.
 //!
-//! - **Data structures** — Syn provides a complete syntax tree that can
-//!   represent any valid Rust source code. The syntax tree is rooted at
-//!   [`syn::File`] which represents a full source file, but there are other
-//!   entry points that may be useful to procedural macros including
+//! - **Data structures** — Syn provides a syntax tree that can represent most
+//!   stable Rust source code and some unstable syntax. The syntax tree is
+//!   rooted at [`syn::File`] which represents a full source file, but there are
+//!   other entry points that may be useful to procedural macros including
 //!   [`syn::Item`], [`syn::Expr`] and [`syn::Type`].
 //!
 //! - **Derives** — Of particular interest to derive macros is
@@ -61,12 +61,16 @@
 //! [`TokenStream`]: proc_macro::TokenStream
 //!
 //! ```toml
-//! [dependencies]
-//! syn = "2.0"
-//! quote = "1.0"
+//! # Cargo.toml
+//! [package]
+//! ...
 //!
 //! [lib]
 //! proc-macro = true
+//!
+//! [dependencies]
+//! syn = "3"
+//! quote = "1"
 //! ```
 //!
 //! ```
@@ -145,11 +149,22 @@
 //! problem.
 //!
 //! ```text
-//! error[E0277]: the trait bound `std::thread::Thread: HeapSize` is not satisfied
-//!  --> src/main.rs:7:5
+//! error[E0277]: the trait bound `Thread: HeapSize` is not satisfied
+//!  --> src/main.rs:9:5
 //!   |
-//! 7 |     bad: std::thread::Thread,
+//! 3 | #[derive(HeapSize)]
+//!   |          -------- required by a bound introduced by this call
+//! ...
+//! 9 |     bad: std::thread::Thread,
 //!   |     ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HeapSize` is not implemented for `Thread`
+//!   |
+//!   = help: the following other types implement trait `HeapSize`:
+//!             &'a T
+//!             Box<T>
+//!             Demo<'a, T>
+//!             String
+//!             [T]
+//!             u8
 //! ```
 //!
 //! <br>
@@ -249,7 +264,7 @@
 //!   dynamic library libproc_macro from rustc toolchain.
 
 #![no_std]
-#![doc(html_root_url = "https://docs.rs/syn/2.0.119")]
+#![doc(html_root_url = "https://docs.rs/syn/3.0.0")]
 #![cfg_attr(docsrs, feature(doc_cfg), doc(auto_cfg = false))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(non_camel_case_types)]
@@ -355,7 +370,7 @@ mod custom_punctuation;
 mod data;
 #[cfg(any(feature = "full", feature = "derive"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
-pub use crate::data::{Field, Fields, FieldsNamed, FieldsUnnamed, Variant};
+pub use crate::data::{Field, FieldModifiers, Fields, FieldsNamed, FieldsUnnamed, Variant};
 
 #[cfg(any(feature = "full", feature = "derive"))]
 mod derive;
@@ -372,7 +387,7 @@ pub use crate::error::{Error, Result};
 mod expr;
 #[cfg(feature = "full")]
 #[cfg_attr(docsrs, doc(cfg(feature = "full")))]
-pub use crate::expr::{Arm, Label, PointerMutability, RangeLimits};
+pub use crate::expr::{Arm, BlockModifiers, ClosureModifiers, Label, RangeLimits};
 #[cfg(any(feature = "full", feature = "derive"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
 pub use crate::expr::{
@@ -394,7 +409,7 @@ pub mod ext;
 mod file;
 #[cfg(feature = "full")]
 #[cfg_attr(docsrs, doc(cfg(feature = "full")))]
-pub use crate::file::File;
+pub use crate::file::{File, Frontmatter};
 
 #[cfg(all(any(feature = "full", feature = "derive"), feature = "printing"))]
 mod fixup;
@@ -405,7 +420,7 @@ mod generics;
 #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
 pub use crate::generics::{
     BoundLifetimes, ConstParam, GenericParam, Generics, LifetimeParam, PredicateLifetime,
-    PredicateType, TraitBound, TraitBoundModifier, TypeParam, TypeParamBound, WhereClause,
+    PredicateType, TraitBound, TraitBoundModifiers, TypeParam, TypeParamBound, WhereClause,
     WherePredicate,
 };
 #[cfg(feature = "full")]
@@ -427,12 +442,14 @@ mod item;
 #[cfg(feature = "full")]
 #[cfg_attr(docsrs, doc(cfg(feature = "full")))]
 pub use crate::item::{
-    FnArg, ForeignItem, ForeignItemFn, ForeignItemMacro, ForeignItemStatic, ForeignItemType,
-    ImplItem, ImplItemConst, ImplItemFn, ImplItemMacro, ImplItemType, ImplRestriction, Item,
-    ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod,
-    ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Receiver,
-    Signature, StaticMutability, TraitItem, TraitItemConst, TraitItemFn, TraitItemMacro,
-    TraitItemType, UseGlob, UseGroup, UseName, UsePath, UseRename, UseTree, Variadic,
+    ConstModifiers, FnArg, FnModifiers, ForeignItem, ForeignItemFn, ForeignItemMacro,
+    ForeignItemStatic, ForeignItemType, ImplItem, ImplItemConst, ImplItemFn, ImplItemMacro,
+    ImplItemType, ImplModifiers, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn,
+    ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait,
+    ItemTraitAlias, ItemType, ItemUnion, ItemUse, Receiver, ReceiverKind, Safety, Signature,
+    StaticMutability, TraitItem, TraitItemConst, TraitItemFn, TraitItemMacro, TraitItemType,
+    TraitModifiers, TypeModifiers, UseGlob, UseGroup, UseName, UsePath, UseRename, UseTree,
+    Variadic, WhereClausePlacement,
 };
 
 mod lifetime;
@@ -440,8 +457,6 @@ mod lifetime;
 pub use crate::lifetime::Lifetime;
 
 mod lit;
-#[doc(hidden)] // https://github.com/dtolnay/syn/issues/1566
-pub use crate::lit::StrStyle;
 #[doc(inline)]
 pub use crate::lit::{
     Lit, LitBool, LitByte, LitByteStr, LitCStr, LitChar, LitFloat, LitInt, LitStr,
@@ -484,8 +499,9 @@ mod pat;
 #[cfg(feature = "full")]
 #[cfg_attr(docsrs, doc(cfg(feature = "full")))]
 pub use crate::pat::{
-    FieldPat, Pat, PatConst, PatIdent, PatLit, PatMacro, PatOr, PatParen, PatPath, PatRange,
-    PatReference, PatRest, PatSlice, PatStruct, PatTuple, PatTupleStruct, PatType, PatWild,
+    FieldPat, Pat, PatConst, PatGuard, PatIdent, PatLit, PatMacro, PatOr, PatParen, PatPath,
+    PatRange, PatReference, PatRest, PatSlice, PatStruct, PatTuple, PatTupleStruct, PatType,
+    PatWild,
 };
 
 #[cfg(any(feature = "full", feature = "derive"))]
@@ -512,7 +528,7 @@ pub mod punctuated;
 mod restriction;
 #[cfg(any(feature = "full", feature = "derive"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
-pub use crate::restriction::{FieldMutability, VisRestricted, Visibility};
+pub use crate::restriction::{VisRestricted, Visibility};
 
 mod sealed;
 
@@ -529,7 +545,7 @@ pub mod spanned;
 mod stmt;
 #[cfg(feature = "full")]
 #[cfg_attr(docsrs, doc(cfg(feature = "full")))]
-pub use crate::stmt::{Block, Local, LocalInit, Stmt, StmtMacro};
+pub use crate::stmt::{Block, Local, LocalInit, LocalModifiers, Stmt, StmtMacro};
 
 mod thread;
 
@@ -541,9 +557,9 @@ mod ty;
 #[cfg(any(feature = "full", feature = "derive"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
 pub use crate::ty::{
-    Abi, BareFnArg, BareVariadic, ReturnType, Type, TypeArray, TypeBareFn, TypeGroup,
-    TypeImplTrait, TypeInfer, TypeMacro, TypeNever, TypeParen, TypePath, TypePtr, TypeReference,
-    TypeSlice, TypeTraitObject, TypeTuple,
+    Abi, FnPtrVariadic, NamedArg, PointerMutability, ReturnType, Type, TypeArray, TypeFnPtr,
+    TypeGroup, TypeImplTrait, TypeInfer, TypeMacro, TypeNever, TypeParen, TypePath, TypePtr,
+    TypeReference, TypeSlice, TypeTraitObject, TypeTuple,
 };
 
 #[cfg(all(any(feature = "full", feature = "derive"), feature = "parsing"))]
@@ -606,8 +622,8 @@ mod gen {
     ///
     /// ```
     /// // [dependencies]
-    /// // quote = "1.0"
-    /// // syn = { version = "2.0", features = ["fold", "full"] }
+    /// // quote = "1"
+    /// // syn = { version = "3", features = ["fold", "full"] }
     ///
     /// use quote::quote;
     /// use syn::fold::{fold_expr, Fold};
@@ -688,8 +704,8 @@ mod gen {
     ///
     /// ```
     /// // [dependencies]
-    /// // quote = "1.0"
-    /// // syn = { version = "2.0", features = ["full", "visit"] }
+    /// // quote = "1"
+    /// // syn = { version = "3", features = ["full", "visit"] }
     ///
     /// use quote::quote;
     /// use syn::visit::{self, Visit};
@@ -808,8 +824,8 @@ mod gen {
     ///
     /// ```
     /// // [dependencies]
-    /// // quote = "1.0"
-    /// // syn = { version = "2.0", features = ["full", "visit-mut"] }
+    /// // quote = "1"
+    /// // syn = { version = "3", features = ["full", "visit-mut"] }
     ///
     /// use quote::quote;
     /// use syn::visit_mut::{self, VisitMut};

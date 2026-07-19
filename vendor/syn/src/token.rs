@@ -248,7 +248,7 @@ macro_rules! define_keywords {
             #[cfg_attr(docsrs, doc(cfg(feature = "extra-traits")))]
             impl Debug for $name {
                 fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    f.write_str(stringify!($name))
+                    format_token(f, $token)
                 }
             }
 
@@ -380,7 +380,7 @@ macro_rules! define_punctuation_structs {
             #[cfg_attr(docsrs, doc(cfg(feature = "extra-traits")))]
             impl Debug for $name {
                 fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    f.write_str(stringify!($name))
+                    format_token(f, $token)
                 }
             }
 
@@ -736,6 +736,7 @@ define_keywords! {
     "raw"         pub struct Raw
     "ref"         pub struct Ref
     "return"      pub struct Return
+    "safe"        pub struct Safe
     "Self"        pub struct SelfType
     "self"        pub struct SelfValue
     "static"      pub struct Static
@@ -915,6 +916,7 @@ macro_rules! Token {
     [raw]         => { $crate::token::Raw };
     [ref]         => { $crate::token::Ref };
     [return]      => { $crate::token::Return };
+    [safe]        => { $crate::token::Safe };
     [Self]        => { $crate::token::SelfType };
     [self]        => { $crate::token::SelfValue };
     [static]      => { $crate::token::Static };
@@ -979,6 +981,11 @@ macro_rules! Token {
     [*=]          => { $crate::token::StarEq };
     [~]           => { $crate::token::Tilde };
     [_]           => { $crate::token::Underscore };
+}
+
+#[cfg(feature = "extra-traits")]
+fn format_token(formatter: &mut fmt::Formatter, repr: &str) -> fmt::Result {
+    write!(formatter, "Token![{}]", repr)
 }
 
 // Not public API.

@@ -197,8 +197,16 @@ fn progress_connect_ack_validates_version_and_magic() {
 
 #[test]
 fn fixed_sizes_match_c_abi() {
-    assert_eq!(std::mem::size_of::<ProgressMsg>(), 2408);
-    assert_eq!(std::mem::align_of::<ProgressMsg>(), 1);
+    #[cfg(swupdate_progress_msg_packed)]
+    {
+        assert_eq!(std::mem::size_of::<ProgressMsg>(), 2408);
+        assert_eq!(std::mem::align_of::<ProgressMsg>(), 1);
+    }
+    #[cfg(not(swupdate_progress_msg_packed))]
+    {
+        assert_eq!(std::mem::size_of::<ProgressMsg>(), 2416);
+        assert_eq!(std::mem::align_of::<ProgressMsg>(), 8);
+    }
     assert_eq!(std::mem::size_of::<ProgressConnectAck>(), 8);
     #[cfg(target_pointer_width = "64")]
     {

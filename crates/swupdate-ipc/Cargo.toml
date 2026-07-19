@@ -14,11 +14,5 @@ async = ["dep:tokio"]
 thiserror = "2"
 tokio = { workspace = true, optional = true }
 
-[build-dependencies]
-# Wire protocol types in src/proto.rs are generated straight from the real
-# SWUpdate C headers when SWUPDATE_INCLUDE_DIR is set; otherwise build.rs uses
-# the checked-in generated default bindings (see src/swupdate_sys.rs).
-bindgen = { version = "0.72", default-features = false, features = ["runtime"] }
-
 [lib]
 crate-type = ["rlib"]

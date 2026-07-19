@@ -1,5 +1,5 @@
 use crate::attr::Attribute;
-use crate::expr::Member;
+use crate::expr::{Expr, Member};
 use crate::ident::Ident;
 use crate::path::{Path, QSelf};
 use crate::punctuated::Punctuated;
@@ -28,6 +28,9 @@ ast_enum_of_structs! {
     pub enum Pat {
         /// A const block: `const { ... }`.
         Const(PatConst),
+
+        /// A pattern with guard predicate: `Some(x) if x > 0`.
+        Guard(PatGuard),
 
         /// A pattern that binds a new variable: `ref mut binding @ SUBPATTERN`.
         Ident(PatIdent),
@@ -115,6 +118,17 @@ ast_struct! {
         pub mutability: Option<Token![mut]>,
         pub ident: Ident,
         pub subpat: Option<(Token![@], Box<Pat>)>,
+    }
+}
+
+ast_struct! {
+    /// A pattern with guard predicate: `Some(x) if x > 0`.
+    #[cfg_attr(docsrs, doc(cfg(feature = "full")))]
+    pub struct PatGuard {
+        pub attrs: Vec<Attribute>,
+        pub pat: Box<Pat>,
+        pub if_token: Token![if],
+        pub guard: Box<Expr>,
     }
 }
 
@@ -226,7 +240,7 @@ ast_struct! {
 ast_struct! {
     /// A single field in a struct pattern.
     ///
-    /// Patterns like the fields of Foo `{ x, ref y, ref mut z }` are treated
+    /// Patterns like the fields of `Pat { x, ref y, ref mut z }` are treated
     /// the same as `x: x, y: ref y, z: ref mut z` but there is no colon token.
     #[cfg_attr(docsrs, doc(cfg(feature = "full")))]
     pub struct FieldPat {
@@ -251,8 +265,8 @@ pub(crate) mod parsing {
     use crate::mac::{self, Macro};
     use crate::parse::{Parse, ParseStream};
     use crate::pat::{
-        FieldPat, Pat, PatIdent, PatOr, PatParen, PatReference, PatRest, PatSlice, PatStruct,
-        PatTuple, PatTupleStruct, PatType, PatWild,
+        FieldPat, Pat, PatGuard, PatIdent, PatOr, PatParen, PatReference, PatRest, PatSlice,
+        PatStruct, PatTuple, PatTupleStruct, PatType, PatWild,
     };
     use crate::path::{self, Path, QSelf};
     use crate::punctuated::Punctuated;
@@ -336,7 +350,8 @@ pub(crate) mod parsing {
 
         /// Parse a pattern, possibly involving `|`, but not a leading `|`.
         pub fn parse_multi(input: ParseStream) -> Result<Self> {
-            multi_pat_impl(input, None)
+            let allow_guard = false;
+            multi_pat_impl(input, None, allow_guard)
         }
 
         /// Parse a pattern, possibly involving `|`, possibly including a
@@ -383,7 +398,14 @@ pub(crate) mod parsing {
         /// macro-generated macro input.
         pub fn parse_multi_with_leading_vert(input: ParseStream) -> Result<Self> {
             let leading_vert: Option<Token![|]> = input.parse()?;
-            multi_pat_impl(input, leading_vert)
+            let allow_guard = false;
+            multi_pat_impl(input, leading_vert, allow_guard)
+        }
+
+        pub(crate) fn parse_multi_with_leading_vert_and_guard(input: ParseStream) -> Result<Self> {
+            let leading_vert: Option<Token![|]> = input.parse()?;
+            let allow_guard = true;
+            multi_pat_impl(input, leading_vert, allow_guard)
         }
     }
 
@@ -399,7 +421,11 @@ pub(crate) mod parsing {
         }
     }
 
-    fn multi_pat_impl(input: ParseStream, leading_vert: Option<Token![|]>) -> Result<Pat> {
+    fn multi_pat_impl(
+        input: ParseStream,
+        leading_vert: Option<Token![|]>,
+        allow_guard: bool,
+    ) -> Result<Pat> {
         let mut pat = Pat::parse_single(input)?;
         if leading_vert.is_some()
             || input.peek(Token![|]) && !input.peek(Token![||]) && !input.peek(Token![|=])
@@ -416,6 +442,16 @@ pub(crate) mod parsing {
                 attrs: Vec::new(),
                 leading_vert,
                 cases,
+            });
+        }
+        if allow_guard && input.peek(Token![if]) {
+            let if_token: Token![if] = input.parse()?;
+            let guard: Expr = input.parse()?;
+            pat = Pat::Guard(PatGuard {
+                attrs: Vec::new(),
+                pat: Box::new(pat),
+                if_token,
+                guard: Box::new(guard),
             });
         }
         Ok(pat)
@@ -813,8 +849,8 @@ pub(crate) mod parsing {
 mod printing {
     use crate::attr::FilterAttrs;
     use crate::pat::{
-        FieldPat, Pat, PatIdent, PatOr, PatParen, PatReference, PatRest, PatSlice, PatStruct,
-        PatTuple, PatTupleStruct, PatType, PatWild,
+        FieldPat, Pat, PatGuard, PatIdent, PatOr, PatParen, PatReference, PatRest, PatSlice,
+        PatStruct, PatTuple, PatTupleStruct, PatType, PatWild,
     };
     use crate::path;
     use crate::path::printing::PathStyle;
@@ -832,6 +868,16 @@ mod printing {
                 at_token.to_tokens(tokens);
                 subpat.to_tokens(tokens);
             }
+        }
+    }
+
+    #[cfg_attr(docsrs, doc(cfg(feature = "printing")))]
+    impl ToTokens for PatGuard {
+        fn to_tokens(&self, tokens: &mut TokenStream) {
+            tokens.append_all(self.attrs.outer());
+            self.pat.to_tokens(tokens);
+            self.if_token.to_tokens(tokens);
+            self.guard.to_tokens(tokens);
         }
     }
 

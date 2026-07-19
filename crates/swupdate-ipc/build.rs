@@ -2,100 +2,100 @@
 // SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
 
-//! Generates the wire protocol types in `src/proto.rs` straight from the real
-//! SWUpdate C headers via bindgen, instead of hand-mirroring them. This is
-//! what should have caught the `progress_msg` packed-layout drift that
-//! previously went unnoticed in a hand-written copy of `struct progress_msg`
-//! (see the doc comment on `ProgressMsg` in `src/proto.rs`).
-//!
-//! When `SWUPDATE_INCLUDE_DIR` is set, bindings are regenerated from its
-//! headers. Otherwise this copies the checked-in default bindings generated
-//! from the supported SWUpdate headers, so consumers do not need the dev
-//! package merely to build the client.
-//!
-//! Header discovery: `bindgen::Builder::header()` requires a path that
-//! actually resolves on disk — it does NOT fall back to clang's `-I` search
-//! for its own primary inputs (only for headers `#include`d from within
-//! them). So `SWUPDATE_INCLUDE_DIR` is joined onto each filename directly,
-//! and also passed as `-I` so those two files can `#include` anything else
-//! (e.g. `swupdate_status.h`) from the same directory.
-
-#[derive(Debug)]
-struct RustNames;
-
-impl bindgen::callbacks::ParseCallbacks for RustNames {
-    fn item_name(&self, item: bindgen::callbacks::ItemInfo<'_>) -> Option<String> {
-        let name = match item.name {
-            "RECOVERY_STATUS" => "RecoveryStatus",
-            "ipc_message" => "IpcMessage",
-            "msgdata" => "MsgData",
-            "msgtype" => "MsgType",
-            "progress_connect_ack" => "ProgressConnectAck",
-            "progress_msg" => "ProgressMsg",
-            "run_type" => "RunType",
-            "sourcetype" => "SourceType",
-            "swupdate_request" => "SwupdateRequest",
-            _ => return None,
-        };
-        Some(name.into())
-    }
-}
-
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(swupdate_progress_msg_packed)");
+    println!("cargo:rerun-if-env-changed=SWUPDATE_PROGRESS_MSG_LAYOUT");
     println!("cargo:rerun-if-env-changed=SWUPDATE_INCLUDE_DIR");
     println!("cargo:rerun-if-changed=src/swupdate_sys.rs");
 
-    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
-    let output = out_dir.join("swupdate_sys.rs");
-    let Ok(include_dir) = std::env::var("SWUPDATE_INCLUDE_DIR") else {
-        std::fs::copy("src/swupdate_sys.rs", output)
-            .expect("default SWUpdate bindings should be readable and writable");
-        return;
+    let packed = match std::env::var("SWUPDATE_PROGRESS_MSG_LAYOUT") {
+        Ok(layout) => match layout.as_str() {
+            "packed" => true,
+            "unpacked" => false,
+            _ => panic!(
+                "SWUPDATE_PROGRESS_MSG_LAYOUT must be `packed` or `unpacked`, got {layout:?}"
+            ),
+        },
+        Err(_) => detect_packed_progress_msg().unwrap_or_else(|| {
+            println!(
+                "cargo:warning=SWUpdate progress_ipc.h was not found; defaulting ProgressMsg to packed"
+            );
+            true
+        }),
     };
+    if packed {
+        println!("cargo:rustc-cfg=swupdate_progress_msg_packed");
+    }
 
-    let include_dir = std::path::Path::new(&include_dir);
-
-    let bindings = bindgen::Builder::default()
-        .header(
-            include_dir
-                .join("progress_ipc.h")
-                .to_string_lossy()
-                .into_owned(),
-        )
-        .header(
-            include_dir
-                .join("network_ipc.h")
-                .to_string_lossy()
-                .into_owned(),
-        )
-        .clang_arg(format!("-I{}", include_dir.display()))
-        .allowlist_type("progress_msg")
-        .allowlist_type("progress_connect_ack")
-        .allowlist_type("ipc_message")
-        .allowlist_type("msgdata")
-        .allowlist_type("swupdate_request")
-        .allowlist_type("msgtype")
-        .allowlist_type("run_type")
-        .allowlist_type("RECOVERY_STATUS")
-        .allowlist_type("sourcetype")
-        .allowlist_var("PROGRESS_API_.*")
-        .allowlist_var("IPC_MAGIC")
-        .allowlist_var("SWUPDATE_API_VERSION")
-        .allowlist_var("CMD_.*")
-        .parse_callbacks(Box::new(RustNames))
-        .default_enum_style(bindgen::EnumVariation::Rust {
-            non_exhaustive: false,
-        })
-        .derive_copy(true)
-        .derive_debug(true)
-        .derive_eq(true)
-        .generate()
-        .expect(
-            "bindgen failed to parse the SWUpdate headers in SWUPDATE_INCLUDE_DIR; check that \
-             progress_ipc.h and network_ipc.h are present there",
+    let mut bindings = std::fs::read_to_string("src/swupdate_sys.rs")
+        .expect("SWUpdate protocol definitions should be readable");
+    if !packed {
+        let marker = "#[repr(C, packed)]\n#[derive(Debug, Copy, Clone, PartialEq, Eq)]\npub struct ProgressMsg";
+        assert!(
+            bindings.contains(marker),
+            "ProgressMsg representation marker should exist"
         );
+        bindings = bindings.replacen(
+            marker,
+            "#[repr(C)]\n#[derive(Debug, Copy, Clone, PartialEq, Eq)]\npub struct ProgressMsg",
+            1,
+        );
+    }
 
-    bindings
-        .write_to_file(output)
-        .expect("generated bindings should be writable");
+    let output = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set by cargo"))
+        .join("swupdate_sys.rs");
+    std::fs::write(output, bindings).expect("selected SWUpdate protocol definitions should be writable");
+}
+
+fn detect_packed_progress_msg() -> Option<bool> {
+    let header = find_progress_header()?;
+    println!("cargo:rerun-if-changed={}", header.display());
+
+    let source = std::fs::read_to_string(&header).unwrap_or_else(|error| {
+        panic!(
+            "failed to read SWUpdate progress header {}: {error}",
+            header.display()
+        )
+    });
+    let packed = progress_msg_is_packed(&source).unwrap_or_else(|| {
+        panic!(
+            "could not find a complete `struct progress_msg` declaration in {}",
+            header.display()
+        )
+    });
+    println!(
+        "cargo:info=selected {} ProgressMsg layout from {}",
+        if packed { "packed" } else { "unpacked" },
+        header.display()
+    );
+    Some(packed)
+}
+
+fn find_progress_header() -> Option<std::path::PathBuf> {
+    let header = std::path::PathBuf::from(std::env::var("SWUPDATE_INCLUDE_DIR").ok()?)
+        .join("progress_ipc.h");
+    header.is_file().then_some(header)
+}
+
+fn progress_msg_is_packed(source: &str) -> Option<bool> {
+    let declaration = &source[source.find("struct progress_msg")?..];
+    let body_start = declaration.find('{')?;
+    let mut nesting = 0;
+    let mut body_end = None;
+    for (index, character) in declaration[body_start..].char_indices() {
+        match character {
+            '{' => nesting += 1,
+            '}' => {
+                nesting -= 1;
+                if nesting == 0 {
+                    body_end = Some(body_start + index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let suffix = &declaration[body_end?..];
+    let terminator = suffix.find(';')?;
+    Some(suffix[..terminator].contains("packed"))
 }

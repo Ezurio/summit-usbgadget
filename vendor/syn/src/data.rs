@@ -1,8 +1,10 @@
 use crate::attr::Attribute;
+#[cfg(feature = "parsing")]
+use crate::error::Result;
 use crate::expr::{Expr, Index, Member};
 use crate::ident::Ident;
 use crate::punctuated::{self, Punctuated};
-use crate::restriction::{FieldMutability, Visibility};
+use crate::restriction::Visibility;
 use crate::token;
 use crate::ty::Type;
 use alloc::vec::Vec;
@@ -187,7 +189,8 @@ ast_struct! {
 
         pub vis: Visibility,
 
-        pub mutability: FieldMutability,
+        /// (Non-exhaustive) Additional optional information about a field.
+        pub modifiers: FieldModifiers,
 
         /// Name of the field, if any.
         ///
@@ -197,6 +200,38 @@ ast_struct! {
         pub colon_token: Option<Token![:]>,
 
         pub ty: Type,
+
+        pub default: Option<(Token![=], Expr)>,
+    }
+}
+
+ast_struct! {
+    /// Additional optional information about a field.
+    ///
+    /// This data structure may grow to accommodate future Rust language
+    /// changes, including the following in-progress RFCs:
+    ///
+    /// - [RFC 3323] "Restrictions", such as `mut(crate)`
+    /// - [RFC 3458] "Unsafe fields"
+    ///
+    /// [RFC 3323]: https://rust-lang.github.io/rfcs/3323-restrictions.html
+    /// [RFC 3458]: https://github.com/rust-lang/rfcs/pull/3458
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
+    #[non_exhaustive]
+    pub struct FieldModifiers {}
+}
+
+impl Default for FieldModifiers {
+    fn default() -> Self {
+        FieldModifiers {}
+    }
+}
+
+impl FieldModifiers {
+    #[cfg(feature = "parsing")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
+    pub fn require_empty(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -240,7 +275,7 @@ impl<'a> Clone for Members<'a> {
 #[cfg(feature = "parsing")]
 pub(crate) mod parsing {
     use crate::attr::Attribute;
-    use crate::data::{Field, Fields, FieldsNamed, FieldsUnnamed, Variant};
+    use crate::data::{Field, FieldModifiers, Fields, FieldsNamed, FieldsUnnamed, Variant};
     use crate::error::Result;
     use crate::expr::Expr;
     use crate::ext::IdentExt as _;
@@ -248,7 +283,7 @@ pub(crate) mod parsing {
     #[cfg(not(feature = "full"))]
     use crate::parse::discouraged::Speculative as _;
     use crate::parse::{Parse, ParseStream};
-    use crate::restriction::{FieldMutability, Visibility};
+    use crate::restriction::Visibility;
     #[cfg(not(feature = "full"))]
     use crate::scan_expr::scan_expr;
     use crate::token;
@@ -347,26 +382,52 @@ pub(crate) mod parsing {
                 input.parse()?
             };
 
+            let default = if input.peek(Token![=]) {
+                let eq_token: Token![=] = input.parse()?;
+                let expr: Expr = input.parse()?;
+                Some((eq_token, expr))
+            } else {
+                None
+            };
+
             Ok(Field {
                 attrs,
                 vis,
-                mutability: FieldMutability::None,
+                modifiers: FieldModifiers {},
                 ident: Some(ident),
                 colon_token: Some(colon_token),
                 ty,
+                default,
             })
         }
 
         /// Parses an unnamed (tuple struct) field.
         #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
         pub fn parse_unnamed(input: ParseStream) -> Result<Self> {
+            let attrs = input.call(Attribute::parse_outer)?;
+            let vis: Visibility = input.parse()?;
+            let ty: Type = input.parse()?;
+
+            if input.peek(Token![=]) {
+                input.parse::<Token![=]>()?;
+                let start_span = input.span();
+                input.parse::<Expr>()?;
+                let end_span = input.cursor().prev_span();
+                return Err(crate::error::new2(
+                    start_span,
+                    end_span,
+                    "field default value is only supported in structs with named fields",
+                ));
+            }
+
             Ok(Field {
-                attrs: input.call(Attribute::parse_outer)?,
-                vis: input.parse()?,
-                mutability: FieldMutability::None,
+                attrs,
+                vis,
+                modifiers: FieldModifiers {},
                 ident: None,
                 colon_token: None,
-                ty: input.parse()?,
+                ty,
+                default: None,
             })
         }
     }
@@ -420,6 +481,10 @@ mod printing {
                 TokensOrDefault(&self.colon_token).to_tokens(tokens);
             }
             self.ty.to_tokens(tokens);
+            if let Some((eq_token, default)) = &self.default {
+                eq_token.to_tokens(tokens);
+                default.to_tokens(tokens);
+            }
         }
     }
 }

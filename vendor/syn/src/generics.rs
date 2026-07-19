@@ -1,4 +1,6 @@
 use crate::attr::Attribute;
+#[cfg(feature = "parsing")]
+use crate::error::Result;
 use crate::expr::Expr;
 use crate::ident::Ident;
 use crate::lifetime::Lifetime;
@@ -73,8 +75,7 @@ ast_struct! {
         pub ident: Ident,
         pub colon_token: Option<Token![:]>,
         pub bounds: Punctuated<TypeParamBound, Token![+]>,
-        pub eq_token: Option<Token![=]>,
-        pub default: Option<Type>,
+        pub default: Option<(Token![=], Type)>,
     }
 }
 
@@ -87,8 +88,7 @@ ast_struct! {
         pub ident: Ident,
         pub colon_token: Token![:],
         pub ty: Type,
-        pub eq_token: Option<Token![=]>,
-        pub default: Option<Expr>,
+        pub default: Option<(Token![=], Expr)>,
     }
 }
 
@@ -390,7 +390,6 @@ impl From<Ident> for TypeParam {
             ident,
             colon_token: None,
             bounds: Punctuated::new(),
-            eq_token: None,
             default: None,
         }
     }
@@ -413,21 +412,45 @@ ast_struct! {
     #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
     pub struct TraitBound {
         pub paren_token: Option<token::Paren>,
-        pub modifier: TraitBoundModifier,
         /// The `for<'a>` in `for<'a> Foo<&'a T>`
         pub lifetimes: Option<BoundLifetimes>,
+        /// (Non-exhaustive) Additional optional information about a trait
+        /// bound.
+        pub modifiers: TraitBoundModifiers,
+        /// The `?` in `?Sized`
+        pub maybe: Option<Token![?]>,
         /// The `Foo<&'a T>` in `for<'a> Foo<&'a T>`
         pub path: Path,
     }
 }
 
-ast_enum! {
-    /// A modifier on a trait bound, currently only used for the `?` in
-    /// `?Sized`.
+ast_struct! {
+    /// Additional optional information about a trait bound.
+    ///
+    /// This data structure may grow to accommodate future Rust language
+    /// changes, including the following in-progress RFCs:
+    ///
+    /// - [RFC 3668] "Async closures" (`async Fn()`)
+    /// - [RFC 3762] "Make trait methods callable in const contexts" (`const Default`)
+    ///
+    /// [RFC 3668]: https://github.com/rust-lang/rust/issues/62290
+    /// [RFC 3762]: https://github.com/rust-lang/rfcs/pull/3762
     #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
-    pub enum TraitBoundModifier {
-        None,
-        Maybe(Token![?]),
+    #[non_exhaustive]
+    pub struct TraitBoundModifiers {}
+}
+
+impl Default for TraitBoundModifiers {
+    fn default() -> Self {
+        TraitBoundModifiers {}
+    }
+}
+
+impl TraitBoundModifiers {
+    #[cfg(feature = "parsing")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
+    pub fn require_empty(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -492,6 +515,7 @@ ast_struct! {
     /// A lifetime predicate in a `where` clause: `'a: 'b + 'c`.
     #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
     pub struct PredicateLifetime {
+        pub attrs: Vec<Attribute>,
         pub lifetime: Lifetime,
         pub colon_token: Token![:],
         pub bounds: Punctuated<Lifetime, Token![+]>,
@@ -502,6 +526,7 @@ ast_struct! {
     /// A type predicate in a `where` clause: `for<'c> Foo<'c>: Trait<'c>`.
     #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
     pub struct PredicateType {
+        pub attrs: Vec<Attribute>,
         /// Any lifetimes from a `for` binding
         pub lifetimes: Option<BoundLifetimes>,
         /// The type being bounded
@@ -521,7 +546,7 @@ pub(crate) mod parsing {
     use crate::ext::IdentExt as _;
     use crate::generics::{
         BoundLifetimes, ConstParam, GenericParam, Generics, LifetimeParam, PredicateLifetime,
-        PredicateType, TraitBound, TraitBoundModifier, TypeParam, TypeParamBound, WhereClause,
+        PredicateType, TraitBound, TraitBoundModifiers, TypeParam, TypeParamBound, WhereClause,
         WherePredicate,
     };
     #[cfg(feature = "full")]
@@ -573,7 +598,6 @@ pub(crate) mod parsing {
                         ident: input.call(Ident::parse_any)?,
                         colon_token: None,
                         bounds: Punctuated::new(),
-                        eq_token: None,
                         default: None,
                     }));
                 } else {
@@ -631,7 +655,7 @@ pub(crate) mod parsing {
             let has_colon;
             Ok(LifetimeParam {
                 attrs: input.call(Attribute::parse_outer)?,
-                lifetime: input.parse()?,
+                lifetime: Lifetime::parse_any(input)?,
                 colon_token: {
                     if input.peek(Token![:]) {
                         has_colon = true;
@@ -648,7 +672,7 @@ pub(crate) mod parsing {
                             if input.is_empty() || input.peek(Token![,]) || input.peek(Token![>]) {
                                 break;
                             }
-                            let value = input.parse()?;
+                            let value = Lifetime::parse_any(input)?;
                             bounds.push_value(value);
                             if !input.peek(Token![+]) {
                                 break;
@@ -726,9 +750,8 @@ pub(crate) mod parsing {
                 }
             }
 
-            let eq_token: Option<Token![=]> = input.parse()?;
-            let default = if eq_token.is_some() {
-                Some(input.parse::<Type>()?)
+            let default = if let Some(eq_token) = input.parse::<Option<Token![=]>>()? {
+                Some((eq_token, input.parse::<Type>()?))
             } else {
                 None
             };
@@ -738,7 +761,6 @@ pub(crate) mod parsing {
                 ident,
                 colon_token,
                 bounds,
-                eq_token,
                 default,
             })
         }
@@ -760,7 +782,7 @@ pub(crate) mod parsing {
             allow_const: bool,
         ) -> Result<Self> {
             if input.peek(Lifetime) {
-                return input.parse().map(TypeParamBound::Lifetime);
+                return Lifetime::parse_any(input).map(TypeParamBound::Lifetime);
             }
 
             #[cfg(feature = "full")]
@@ -858,8 +880,8 @@ pub(crate) mod parsing {
                 }
             }
 
-            let modifier: TraitBoundModifier = input.parse()?;
-            if lifetimes.is_none() && matches!(modifier, TraitBoundModifier::Maybe(_)) {
+            let maybe: Option<Token![?]> = input.parse()?;
+            if lifetimes.is_none() && maybe.is_some() {
                 lifetimes = input.parse()?;
             }
 
@@ -874,12 +896,9 @@ pub(crate) mod parsing {
             }
 
             if lifetimes.is_some() {
-                match modifier {
-                    TraitBoundModifier::None => {}
-                    TraitBoundModifier::Maybe(maybe) => {
-                        let msg = "`for<...>` binder not allowed with `?` trait polarity modifier";
-                        return Err(Error::new(maybe.span, msg));
-                    }
+                if let Some(maybe) = maybe {
+                    let msg = "`for<...>` binder not allowed with `?` trait polarity modifier";
+                    return Err(Error::new(maybe.span, msg));
                 }
             }
 
@@ -888,8 +907,9 @@ pub(crate) mod parsing {
             } else {
                 Ok(Some(TraitBound {
                     paren_token: None,
-                    modifier,
                     lifetimes,
+                    modifiers: TraitBoundModifiers {},
+                    maybe,
                     path,
                 }))
             }
@@ -897,36 +917,23 @@ pub(crate) mod parsing {
     }
 
     #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
-    impl Parse for TraitBoundModifier {
-        fn parse(input: ParseStream) -> Result<Self> {
-            if input.peek(Token![?]) {
-                input.parse().map(TraitBoundModifier::Maybe)
-            } else {
-                Ok(TraitBoundModifier::None)
-            }
-        }
-    }
-
-    #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     impl Parse for ConstParam {
         fn parse(input: ParseStream) -> Result<Self> {
-            let mut default = None;
             Ok(ConstParam {
                 attrs: input.call(Attribute::parse_outer)?,
                 const_token: input.parse()?,
                 ident: input.parse()?,
                 colon_token: input.parse()?,
                 ty: input.parse()?,
-                eq_token: {
+                default: {
                     if input.peek(Token![=]) {
                         let eq_token = input.parse()?;
-                        default = Some(path::parsing::const_argument(input)?);
-                        Some(eq_token)
+                        let default = path::parsing::const_argument(input)?;
+                        Some((eq_token, default))
                     } else {
                         None
                     }
                 },
-                default,
             })
         }
     }
@@ -983,9 +990,11 @@ pub(crate) mod parsing {
     #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     impl Parse for WherePredicate {
         fn parse(input: ParseStream) -> Result<Self> {
+            let attrs = input.call(Attribute::parse_outer)?;
             if input.peek(Lifetime) && input.peek2(Token![:]) {
                 Ok(WherePredicate::Lifetime(PredicateLifetime {
-                    lifetime: input.parse()?,
+                    attrs,
+                    lifetime: Lifetime::parse_any(input)?,
                     colon_token: input.parse()?,
                     bounds: {
                         let mut bounds = Punctuated::new();
@@ -999,7 +1008,7 @@ pub(crate) mod parsing {
                             {
                                 break;
                             }
-                            let value = input.parse()?;
+                            let value = Lifetime::parse_any(input)?;
                             bounds.push_value(value);
                             if !input.peek(Token![+]) {
                                 break;
@@ -1012,6 +1021,7 @@ pub(crate) mod parsing {
                 }))
             } else {
                 Ok(WherePredicate::Type(PredicateType {
+                    attrs,
                     lifetimes: input.parse()?,
                     bounded_ty: input.parse()?,
                     colon_token: input.parse()?,
@@ -1093,7 +1103,7 @@ pub(crate) mod parsing {
         fn parse(input: ParseStream) -> Result<Self> {
             let lookahead = input.lookahead1();
             if lookahead.peek(Lifetime) {
-                input.parse().map(CapturedParam::Lifetime)
+                Lifetime::parse_any(input).map(CapturedParam::Lifetime)
             } else if lookahead.peek(Ident) || input.peek(Token![Self]) {
                 input.call(Ident::parse_any).map(CapturedParam::Ident)
             } else {
@@ -1154,8 +1164,8 @@ pub(crate) mod printing {
     use crate::fixup::FixupContext;
     use crate::generics::{
         BoundLifetimes, ConstParam, GenericParam, Generics, ImplGenerics, LifetimeParam,
-        PredicateLifetime, PredicateType, TraitBound, TraitBoundModifier, Turbofish, TypeGenerics,
-        TypeParam, WhereClause,
+        PredicateLifetime, PredicateType, TraitBound, Turbofish, TypeGenerics, TypeParam,
+        WhereClause,
     };
     #[cfg(feature = "full")]
     use crate::generics::{CapturedParam, PreciseCapture};
@@ -1336,8 +1346,8 @@ pub(crate) mod printing {
                 TokensOrDefault(&self.colon_token).to_tokens(tokens);
                 self.bounds.to_tokens(tokens);
             }
-            if let Some(default) = &self.default {
-                TokensOrDefault(&self.eq_token).to_tokens(tokens);
+            if let Some((eq_token, default)) = &self.default {
+                eq_token.to_tokens(tokens);
                 default.to_tokens(tokens);
             }
         }
@@ -1347,23 +1357,13 @@ pub(crate) mod printing {
     impl ToTokens for TraitBound {
         fn to_tokens(&self, tokens: &mut TokenStream) {
             let to_tokens = |tokens: &mut TokenStream| {
-                self.modifier.to_tokens(tokens);
                 self.lifetimes.to_tokens(tokens);
+                self.maybe.to_tokens(tokens);
                 self.path.to_tokens(tokens);
             };
             match &self.paren_token {
                 Some(paren) => paren.surround(tokens, to_tokens),
                 None => to_tokens(tokens),
-            }
-        }
-    }
-
-    #[cfg_attr(docsrs, doc(cfg(feature = "printing")))]
-    impl ToTokens for TraitBoundModifier {
-        fn to_tokens(&self, tokens: &mut TokenStream) {
-            match self {
-                TraitBoundModifier::None => {}
-                TraitBoundModifier::Maybe(t) => t.to_tokens(tokens),
             }
         }
     }
@@ -1376,8 +1376,8 @@ pub(crate) mod printing {
             self.ident.to_tokens(tokens);
             self.colon_token.to_tokens(tokens);
             self.ty.to_tokens(tokens);
-            if let Some(default) = &self.default {
-                TokensOrDefault(&self.eq_token).to_tokens(tokens);
+            if let Some((eq_token, default)) = &self.default {
+                eq_token.to_tokens(tokens);
                 print_const_argument(default, tokens);
             }
         }
@@ -1396,6 +1396,7 @@ pub(crate) mod printing {
     #[cfg_attr(docsrs, doc(cfg(feature = "printing")))]
     impl ToTokens for PredicateLifetime {
         fn to_tokens(&self, tokens: &mut TokenStream) {
+            tokens.append_all(self.attrs.outer());
             self.lifetime.to_tokens(tokens);
             self.colon_token.to_tokens(tokens);
             self.bounds.to_tokens(tokens);
@@ -1405,6 +1406,7 @@ pub(crate) mod printing {
     #[cfg_attr(docsrs, doc(cfg(feature = "printing")))]
     impl ToTokens for PredicateType {
         fn to_tokens(&self, tokens: &mut TokenStream) {
+            tokens.append_all(self.attrs.outer());
             self.lifetimes.to_tokens(tokens);
             self.bounded_ty.to_tokens(tokens);
             self.colon_token.to_tokens(tokens);
