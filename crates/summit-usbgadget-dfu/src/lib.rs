@@ -11,7 +11,6 @@ use summit_usbgadget_usb::registry::{FunctionBuildContext, GadgetService, Regist
 use summit_usbgadget_swupdate::sysinfo::SystemInfo;
 use summit_usbgadget_swupdate::SwupdateConfig;
 
-mod functionfs;
 mod handler;
 
 pub mod config;

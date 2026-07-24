@@ -12,8 +12,9 @@ use usb_gadget::function::custom::{Custom, Event, Interface};
 use usb_gadget::function::Handle;
 use usb_gadget::Class;
 
+use summit_usbgadget_usb::functionfs::{is_closed_transport_error, serve as functionfs_serve, EventHandler};
+
 use crate::config::DfuConfigError;
-use crate::functionfs::{EventHandler, is_closed_transport_error};
 use crate::protocol::request;
 
 use super::{Dfu, DfuConfig, DfuFnConfig};
@@ -66,7 +67,7 @@ pub fn build_dfu(
 /// dropped (when the gadget is removed).
 pub async fn serve(udc_name: String, mut runtime: DfuRuntime) {
     let mut handler = Dfu::new(runtime.config.clone());
-    crate::functionfs::serve(
+    functionfs_serve(
         udc_name,
         "DFU control requests",
         &mut runtime.custom,
