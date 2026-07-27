@@ -79,9 +79,13 @@ impl<'a> TcpFastbootSession<'a> {
     async fn dispatch(&mut self, cmd: &[u8]) -> io::Result<()> {
         log::debug!("fastboot-tcp {} command: {}", self.peer, String::from_utf8_lossy(cmd));
 
-        match parse_command(cmd) {
+        let Some((command, _)) = parse_command(cmd) else {
+            return self.transport.send_packet(FAIL_CMD).await;
+        };
+
+        match command {
             ParsedCommand::WOpen => self.handle_wopen().await,
-            ParsedCommand::GetVar => self.handle_getvar(cmd).await,
+            ParsedCommand::GetVar(arg) => self.handle_getvar(&arg).await,
             ParsedCommand::Fetch(target) => self.handle_fetch(target).await,
             ParsedCommand::FetchUnknownPart => self.transport.send_packet(FAIL_UNKNOWN_PART).await,
             ParsedCommand::Download { len, kind } => self.handle_download(len, kind).await,
@@ -105,8 +109,8 @@ impl<'a> TcpFastbootSession<'a> {
         self.transport.send_packet(OKAY).await
     }
 
-    async fn handle_getvar(&mut self, cmd: &[u8]) -> io::Result<()> {
-        match fastboot_getvar_reply(cmd, &self.config.serial) {
+    async fn handle_getvar(&mut self, arg: &str) -> io::Result<()> {
+        match fastboot_getvar_reply(arg, &self.config.serial) {
             Some(reply) => self.transport.send_packet(&reply).await,
             None => self.transport.send_packet(FAIL_CMD).await,
         }

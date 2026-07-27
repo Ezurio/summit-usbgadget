@@ -9,7 +9,7 @@
 //! append to commands. Nothing here touches a transport, so both the USB
 //! function and the TCP service reuse exactly the same command vocabulary.
 
-use summit_usbgadget_swupdate::sysinfo::SystemInfo;
+use summit_usbgadget_swupdate::sysinfo::{boot_info, SystemInfo};
 
 /// Fixed reply / info tokens shared by every fastboot transport. Grouped into
 /// one module so callers can `use fastboot_proto::reply::*;` instead of
@@ -67,7 +67,7 @@ pub enum ParsedCommand {
     /// `WOpen:` — open an FBK download session.
     WOpen,
     /// `getvar:<name>` — read a device variable.
-    GetVar,
+    GetVar(String),
     /// `fetch:<target>` — upload device information.
     Fetch(FetchTarget),
     /// `fetch:<unknown>` — upload of an unsupported partition.
@@ -89,141 +89,101 @@ pub enum ParsedCommand {
     Unsupported,
 }
 
-fn trim_command(data: &[u8]) -> &[u8] {
-    let start = data.iter().position(|b| !matches!(*b, b'\0' | b' ' | b'\t' | b'\r' | b'\n'));
-    let Some(start) = start else {
-        return &[];
-    };
-    let end = data
-        .iter()
-        .rposition(|b| !matches!(*b, b'\0' | b' ' | b'\t' | b'\r' | b'\n'))
-        .expect("trim_command start implies non-empty slice");
-    &data[start..=end]
+const DOWNLOAD_SIZE_WIDTH: usize = 8;
+
+fn is_padding_byte(b: u8) -> bool {
+    b == b'\0' || b.is_ascii_whitespace()
 }
 
-/// Splits the first command token off the front of `data`, returning the
-/// command bytes and the number of leading bytes consumed (the command plus any
-/// skipped padding). A `download:` request keeps its fixed-width hex argument
-/// even when the host concatenates the payload immediately after it.
-pub fn split_command(data: &[u8]) -> Option<(&[u8], usize)> {
-    let start = data.iter().position(|b| !matches!(*b, b'\0' | b' ' | b'\t' | b'\r' | b'\n'))?;
+/// Parses one command from the front of `data`, returning the command and the
+/// bytes to remove from the stream. A download command consumes its fixed-size
+/// header only, leaving any immediately following payload untouched.
+pub fn parse_command(data: &[u8]) -> Option<(ParsedCommand, usize)> {
+    let start = data.iter().position(|b| !is_padding_byte(*b))?;
     let rest = &data[start..];
 
-    for prefix in [b"download:%".as_slice(), b"download:", b"donwload:"] {
-        let cmd_len = prefix.len() + 8;
-        if rest.len() >= cmd_len
-            && rest.starts_with(prefix)
-            && rest[prefix.len()..cmd_len].iter().all(u8::is_ascii_hexdigit)
-        {
-            let consumed = start + cmd_len;
-            return Some((&data[start..consumed], consumed));
-        }
-    }
+    let (command, consumed) = if let Some(colon) = rest.iter().position(|b| *b == b':') {
+        let name = &rest[..colon];
+        let args = &rest[colon + 1..];
+        let token_len = || args.iter().position(|b| is_padding_byte(*b)).unwrap_or(args.len());
 
-    let end = rest
-        .iter()
-        .position(|b| matches!(*b, b'\0' | b' ' | b'\t' | b'\r' | b'\n'))
-        .unwrap_or(rest.len());
-    let consumed = start + end;
-    Some((&data[start..start + end], consumed))
-}
-
-/// Returns the argument following a command `prefix`, with the surrounding
-/// whitespace/NUL padding trimmed first. `None` if `cmd` does not start with
-/// `prefix`. This is the shared shape of every FBK / fastboot command parser.
-fn command_arg<'a>(cmd: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
-    trim_command(cmd).strip_prefix(prefix)
-}
-
-fn parse_download_len(cmd: &[u8]) -> Option<usize> {
-    let payload = command_arg(cmd, b"download:%")
-        .or_else(|| command_arg(cmd, b"donwload:"))
-        .or_else(|| command_arg(cmd, b"download:"))?;
-    let payload = std::str::from_utf8(trim_command(payload)).ok()?;
-    usize::from_str_radix(payload, 16).ok()
-}
-
-fn download_kind(cmd: &[u8]) -> Option<DownloadKind> {
-    if command_arg(cmd, b"download:%").is_some() {
-        Some(DownloadKind::Fastboot)
-    } else if command_arg(cmd, b"donwload:").is_some() || command_arg(cmd, b"download:").is_some() {
-        Some(DownloadKind::Plain)
+        let (command, arg_len) = match name {
+            b"download" | b"donwload" => {
+                // Only the correctly spelled prefix supports the fastboot `%`
+                // marker. The size is a fixed 8 hex digits, and the data-phase
+                // payload can follow immediately with no separator, so it must
+                // be sliced directly rather than scanned for.
+                let percent = name == b"download" && args.starts_with(b"%");
+                let size_start = percent as usize;
+                let size = std::str::from_utf8(args.get(size_start..size_start + DOWNLOAD_SIZE_WIDTH)?).ok()?;
+                let len = usize::from_str_radix(size, 16).ok()?;
+                let kind = if percent { DownloadKind::Fastboot } else { DownloadKind::Plain };
+                (ParsedCommand::Download { len, kind }, size_start + DOWNLOAD_SIZE_WIDTH)
+            }
+            b"WOpen" if args.is_empty() => (ParsedCommand::WOpen, 0),
+            b"getvar" => {
+                let len = token_len();
+                match std::str::from_utf8(&args[..len]).ok().filter(|arg| !arg.is_empty()) {
+                    Some(arg) => (ParsedCommand::GetVar(arg.to_owned()), len),
+                    None => (ParsedCommand::Unsupported, len),
+                }
+            }
+            b"fetch" => {
+                let len = token_len();
+                let arg = std::str::from_utf8(&args[..len]).ok()?;
+                let command = match arg.split(':').next().unwrap_or_default() {
+                    "sysinfo" => ParsedCommand::Fetch(FetchTarget::Sysinfo),
+                    "sysinfo.json" => ParsedCommand::Fetch(FetchTarget::SysinfoJson),
+                    _ => ParsedCommand::FetchUnknownPart,
+                };
+                (command, len)
+            }
+            b"flash" => {
+                let len = token_len();
+                let command = match &args[..len] {
+                    b"update" => ParsedCommand::Flash(FlashTarget::Update),
+                    b"swu" => ParsedCommand::Flash(FlashTarget::Swu),
+                    _ => ParsedCommand::FlashUnknownPart,
+                };
+                (command, len)
+            }
+            _ => (ParsedCommand::Unsupported, token_len()),
+        };
+        (command, colon + 1 + arg_len)
     } else {
-        None
-    }
-}
-
-fn parse_fastboot_fetch(cmd: &[u8]) -> Option<&[u8]> {
-    let rest = command_arg(cmd, b"fetch:")?;
-    Some(rest.split(|b| *b == b':').next().unwrap_or(rest))
-}
-
-/// Classifies a single FBK / fastboot command.
-pub fn parse_command(cmd: &[u8]) -> ParsedCommand {
-    let cmd = trim_command(cmd);
-
-    if cmd.starts_with(b"WOpen:") {
-        return ParsedCommand::WOpen;
-    }
-
-    if command_arg(cmd, b"getvar:").is_some() {
-        return ParsedCommand::GetVar;
-    }
-
-    if let Some(target) = parse_fastboot_fetch(cmd) {
-        return match target {
-            b"sysinfo" => ParsedCommand::Fetch(FetchTarget::Sysinfo),
-            b"sysinfo.json" => ParsedCommand::Fetch(FetchTarget::SysinfoJson),
-            _ => ParsedCommand::FetchUnknownPart,
+        // No colon at all: the only valid command in this form is "Close".
+        let len = rest.iter().position(|b| is_padding_byte(*b)).unwrap_or(rest.len());
+        let command = if &rest[..len] == b"Close" {
+            ParsedCommand::Close
+        } else {
+            ParsedCommand::Unsupported
         };
-    }
-
-    if let Some(len) = parse_download_len(cmd) {
-        return ParsedCommand::Download {
-            len,
-            kind: download_kind(cmd).expect("parse_download_len implies a download prefix"),
-        };
-    }
-
-    if let Some(partition) = command_arg(cmd, b"flash:") {
-        return match partition {
-            b"update" => ParsedCommand::Flash(FlashTarget::Update),
-            b"swu" => ParsedCommand::Flash(FlashTarget::Swu),
-            _ => ParsedCommand::FlashUnknownPart,
-        };
-    }
-
-    if cmd.eq_ignore_ascii_case(b"Close") {
-        return ParsedCommand::Close;
-    }
-
-    ParsedCommand::Unsupported
+        (command, len)
+    };
+    Some((command, start + consumed))
 }
 
 /// Builds the reply for a fastboot `getvar:<name>` query, or `None` for
 /// variables this device does not expose.
-pub fn fastboot_getvar_reply(cmd: &[u8], serial: &str) -> Option<Vec<u8>> {
-    match trim_command(cmd) {
-        b"getvar:version" => Some(b"OKAY0.4".to_vec()),
-        b"getvar:max-download-size" => Some(b"OKAY400000000".to_vec()),
-        b"getvar:max-fetch-size" => Some(b"OKAY00010000".to_vec()),
-        b"getvar:product" => Some(b"OKAYsummit-usbgadget".to_vec()),
-        b"getvar:serialno" => Some(format!("OKAY{serial}").into_bytes()),
-        b"getvar:is-userspace" => Some(b"OKAYyes".to_vec()),
-        b"getvar:all" => Some(b"OKAYversion:0.4".to_vec()),
-        cmd if matches!(command_arg(cmd, b"getvar:has-slot:"), Some(b"update" | b"swu")) => {
-            Some(b"OKAYno".to_vec())
+pub fn fastboot_getvar_reply(arg: &str, serial: &str) -> Option<Vec<u8>> {
+    match arg {
+        "version" => Some(b"OKAY0.4".to_vec()),
+        "max-download-size" => Some(b"OKAY400000000".to_vec()),
+        "max-fetch-size" => Some(b"OKAY00010000".to_vec()),
+        "product" => Some(b"OKAYsummit-usbgadget".to_vec()),
+        "serialno" => Some(format!("OKAY{serial}").into_bytes()),
+        "is-userspace" => Some(b"OKAYyes".to_vec()),
+        "current-slot" => boot_info().current_side_option().map(|side| format!("OKAY{side}").into_bytes()),
+        "slot-num" => {
+            let num = if boot_info().is_single_slot() { 1 } else { 2 };
+            Some(format!("OKAY{num}").into_bytes())
         }
-        cmd if matches!(command_arg(cmd, b"getvar:is-logical:"), Some(b"update" | b"swu")) => {
-            Some(b"OKAYno".to_vec())
-        }
-        cmd if matches!(command_arg(cmd, b"getvar:partition-type:"), Some(b"update" | b"swu")) => {
-            Some(b"OKAYraw".to_vec())
-        }
-        cmd if matches!(command_arg(cmd, b"getvar:partition-size:"), Some(b"update" | b"swu")) => {
-            Some(b"OKAY400000000".to_vec())
-        }
-        cmd if matches!(command_arg(cmd, b"getvar:partition-size:"), Some(b"sysinfo" | b"sysinfo.json")) => {
+        "all" => Some(b"OKAYversion:0.4".to_vec()),
+        "has-slot:update" | "has-slot:swu" => Some(b"OKAYno".to_vec()),
+        "is-logical:update" | "is-logical:swu" => Some(b"OKAYno".to_vec()),
+        "partition-type:update" | "partition-type:swu" => Some(b"OKAYraw".to_vec()),
+        "partition-size:update" | "partition-size:swu" => Some(b"OKAY400000000".to_vec()),
+        "partition-size:sysinfo" | "partition-size:sysinfo.json" => {
             let mut json = Vec::new();
             SystemInfo::collect(Some(serial.to_owned())).write_json(&mut json);
             Some(format!("OKAY{:08X}", json.len()).into_bytes())

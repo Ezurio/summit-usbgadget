@@ -32,9 +32,15 @@ impl BootRootfsInfo {
         self.root_dev_type == "initramfs"
     }
 
+    /// Whether the system boots from a single, non-A/B source (SD card or
+    /// initramfs) rather than the dual-slot (A/B) eMMC scheme.
+    pub fn is_single_slot(&self) -> bool {
+        self.is_running_on_sd() || self.is_running_on_initramfs()
+    }
+
     /// Whether `fw_update` pipe mode should be used for firmware installation.
     pub fn use_pipe_mode(&self) -> bool {
-        self.is_running_on_sd() || self.is_running_on_initramfs()
+        self.is_single_slot()
     }
 
     /// The current boot side (`"a"` or `"b"`), if valid.

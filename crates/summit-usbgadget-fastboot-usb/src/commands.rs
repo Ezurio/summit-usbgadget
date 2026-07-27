@@ -8,7 +8,7 @@ use usb_gadget::function::custom::EndpointSender;
 
 use crate::send_static;
 use summit_usbgadget_fastboot_proto::{
-    data_header, fastboot_getvar_reply, parse_command, split_command, DownloadKind, FetchTarget,
+    data_header, fastboot_getvar_reply, parse_command, DownloadKind, FetchTarget,
     FlashTarget, ParsedCommand,
 };
 use super::{
@@ -170,23 +170,23 @@ pub(super) async fn handle_command_chunk(
     udc_name: &str,
     chunk: &mut BytesMut,
 ) -> bool {
-    let Some((cmd, consumed)) = split_command(chunk.as_ref()) else {
+    let Some((command, consumed)) = parse_command(chunk.as_ref()) else {
         return false;
     };
-    let cmd = cmd.to_vec();
+    let cmd = String::from_utf8_lossy(&chunk[..consumed]).into_owned();
     let _ = chunk.split_to(consumed);
 
-    log::warn!("[{udc_name}] fastboot-usb command rx: {}", String::from_utf8_lossy(&cmd));
+    log::warn!("[{udc_name}] fastboot-usb command rx: {cmd}");
 
-    match parse_command(&cmd) {
+    match command {
         ParsedCommand::WOpen => handle_wopen_command(state, udc_name).await,
-        ParsedCommand::GetVar => {
-            if let Some(reply) = fastboot_getvar_reply(&cmd, &state.serial) {
+        ParsedCommand::GetVar(arg) => {
+            if let Some(reply) = fastboot_getvar_reply(&arg, &state.serial) {
                 log::warn!("[{udc_name}] fastboot reply tx: {}", String::from_utf8_lossy(&reply));
                 let _ = state.tx.send_async(Bytes::from(reply)).await;
                 true
             } else {
-                log::warn!("[{udc_name}] unsupported fastboot-usb command: {}", String::from_utf8_lossy(&cmd));
+                log::warn!("[{udc_name}] unsupported fastboot-usb command: {cmd}");
                 let _ = send_static(&mut state.tx, FAIL_CMD).await;
                 false
             }
@@ -204,7 +204,7 @@ pub(super) async fn handle_command_chunk(
         }
         ParsedCommand::Close => handle_close_command(state, udc_name).await,
         ParsedCommand::Unsupported => {
-            log::warn!("[{udc_name}] unsupported fastboot-usb command: {}", String::from_utf8_lossy(&cmd));
+            log::warn!("[{udc_name}] unsupported fastboot-usb command: {cmd}");
             let _ = send_static(&mut state.tx, FAIL_CMD).await;
             false
         }
