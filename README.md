@@ -179,7 +179,7 @@ poll_timeout_ms = 10
 # image_mode = "full"
 # dry_run = false
 # disable_store_swu = true
-# timeout_secs = 120
+# timeout_secs = 600
 
 # Stream to an incoming TCP or TLS socket instead of local SWUpdate.
 # download = "socket"

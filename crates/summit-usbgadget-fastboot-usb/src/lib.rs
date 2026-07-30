@@ -115,6 +115,16 @@ struct FastbootUsbState {
     downloaded_size: usize,
     fastboot_pending_flash: bool,
     finish_pending: bool,
+    /// Set once swupdate has given up mid-download (status verdict failure, or
+    /// a write to it failing). The host still expects to push exactly
+    /// `download_size` bytes before its next command, so instead of aborting
+    /// the endpoint mid-transfer (which would leave undelivered firmware bytes
+    /// in flight to be misparsed as the next fastboot command — the framing
+    /// bug this flag exists to avoid), the remaining announced bytes keep
+    /// arriving and are silently discarded until the real boundary, at which
+    /// point this reply is finally sent and the session reset. `None` means no
+    /// download failure is being drained.
+    pending_fail_reply: Option<&'static [u8]>,
     /// Set once a bulk-OUT operation sees a closed-transport error
     /// (`is_closed_transport_error`: `ENOTCONN`/`ESHUTDOWN`/`BrokenPipe`, or
     /// ci_hdrc's unbind-time `EINTR`), which means the endpoint is gone for

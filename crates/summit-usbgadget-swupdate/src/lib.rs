@@ -43,7 +43,7 @@ impl SwupdateConfig {
             image_mode: self.image_mode.clone(),
             dry_run: self.dry_run.unwrap_or(false),
             disable_store_swu: self.disable_store_swu.unwrap_or(true),
-            timeout: Duration::from_secs(self.timeout_secs.unwrap_or(120)),
+            timeout: Duration::from_secs(self.timeout_secs.unwrap_or(600)),
         })
     }
 
@@ -88,7 +88,7 @@ impl Default for SwupdateParams {
             image_mode: None,
             dry_run: false,
             disable_store_swu: true,
-            timeout: Duration::from_secs(120),
+            timeout: Duration::from_secs(600),
         }
     }
 }

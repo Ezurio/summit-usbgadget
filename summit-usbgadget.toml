@@ -60,7 +60,7 @@ poll_timeout_ms = 10
 # image_mode = "full"         # default label for the A/B case; replaceable
 # dry_run = false
 # disable_store_swu = true    # default; set false to let SWUpdate store the SWU
-# timeout_secs = 120
+# timeout_secs = 600
 # upload serves DFU_UPLOAD. Use a file path to read firmware back, or "sysinfo"
 # to report device system information (model, serial, SoC, memory, HW part no.):
 # upload = "sysinfo"
@@ -77,7 +77,7 @@ poll_timeout_ms = 10
 # image_mode = "full"
 # dry_run = false
 # disable_store_swu = true
-# timeout_secs = 120
+# timeout_secs = 600
 # [socket_source.tls]
 # server_cert = "/etc/ssl/certs/update-server.pem"
 # server_key = "/etc/ssl/private/update-server.key"
@@ -96,7 +96,7 @@ poll_timeout_ms = 10
 # image_mode = "full"
 # dry_run = false
 # disable_store_swu = true
-# timeout_secs = 120
+# timeout_secs = 600
 
 # A fastboot-usb-style streamed upload/download interface implemented by this service.
 # It accepts the same options as the `dfu` function above.

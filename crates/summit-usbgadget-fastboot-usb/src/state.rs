@@ -91,6 +91,7 @@ impl FastbootUsbState {
             downloaded_size: 0,
             fastboot_pending_flash: false,
             finish_pending: false,
+            pending_fail_reply: None,
             gadget_torn_down: false,
         }
     }
@@ -102,6 +103,25 @@ impl FastbootUsbState {
         self.downloaded_size = 0;
         self.fastboot_pending_flash = false;
         self.finish_pending = false;
+        self.pending_fail_reply = None;
+    }
+
+    /// Marks the active download as failed without touching the bulk endpoint
+    /// or the announced `download_size`/`downloaded_size` boundary: the host
+    /// is still mid-write of the announced download and will keep pushing
+    /// bytes regardless of what swupdate did, so tearing the endpoint down
+    /// here (as a hard `reset()` would) leaves those still-arriving firmware
+    /// bytes to be misread as the next fastboot command once this state
+    /// machine goes back to parsing commands — exactly the framing corruption
+    /// this exists to avoid. Instead, the caller keeps draining and discarding
+    /// received bytes (see the `pending_fail_reply` check in
+    /// `handle_download_chunk`) until the real boundary, at which point `reply`
+    /// is sent and the session is reset.
+    async fn fail_download(&mut self, reply: &'static [u8]) {
+        if let Some(download) = self.download.as_mut() {
+            download.abort().await;
+        }
+        self.pending_fail_reply = Some(reply);
     }
 
     /// Quiesces the bulk receive path, following the IO teardown order
@@ -113,9 +133,10 @@ impl FastbootUsbState {
     /// quiesced), which is a use-after-free/race.
     ///
     /// Every hard-failure caller (stall timeout, unrecoverable recv error,
-    /// mid-download swupdate failure, transport close) pairs this with exiting
-    /// `serve_connected` entirely instead of looping back — see
-    /// [`serve_connected`](Self::serve_connected).
+    /// transport close) pairs this with exiting `serve_connected` entirely
+    /// instead of looping back — see [`serve_connected`](Self::serve_connected).
+    /// A mid-download swupdate failure is deliberately *not* one of these
+    /// callers: see [`fail_download`](Self::fail_download).
     pub(super) async fn reset(&mut self, udc_name: &str, reply: Option<&'static [u8]>) {
         if let Err(err) = self.rx.cancel() {
             log::debug!("[{udc_name}] fastboot-usb receive endpoint cancel failed: {err}");
@@ -216,12 +237,14 @@ impl FastbootUsbState {
     /// machine, watching the control loop's `enabled` signal. Returns as soon as
     /// the function is disabled, the control loop ends, *or* any hard failure
     /// occurs where retrying in place is not expected (stall timeout, transport
-    /// close, mid-download SWUpdate failure, an unrecoverable bulk recv error).
-    /// Every one of those paths already ran `reset()` (which quiesces the bulk
-    /// path and best-effort replies FAIL) before returning; this function never
-    /// loops back to re-arm the endpoint after a hard failure — the caller
-    /// (`data_loop`) simply drops back to `wait_for_enabled`, i.e. the same
-    /// as a real Disable, until the function is genuinely re-enabled.
+    /// close, an unrecoverable bulk recv error). Every one of those paths
+    /// already ran `reset()` (which quiesces the bulk path and best-effort
+    /// replies FAIL) before returning; this function never loops back to
+    /// re-arm the endpoint after a hard failure — the caller (`data_loop`)
+    /// simply drops back to `wait_for_enabled`, i.e. the same as a real
+    /// Disable, until the function is genuinely re-enabled. A mid-download
+    /// SWUpdate failure is *not* one of these hard failures: it keeps serving,
+    /// draining the remaining announced bytes — see `fail_download`.
     async fn serve_connected(&mut self, udc_name: &str, enabled: &mut watch::Receiver<bool>) {
         // First real touch of the bulk endpoint for this connection: only
         // reached once the control loop has reported the function enabled, so
@@ -230,18 +253,21 @@ impl FastbootUsbState {
         self.rx_max_packet_size = self.rx.max_packet_size().unwrap_or(self.rx_max_packet_size_default);
 
         loop {
-            // Fail fast on a mid-download swupdate error before priming a read,
-            // so the reset never has to cancel a freshly-submitted (maybe
-            // actively DMA-ing) buffer.
-            if !self.finish_pending && self.download_active() {
+            // Check for a mid-download swupdate error before priming a read.
+            // The host is still mid-write of the announced download and will
+            // keep sending bytes regardless, so this must not reset() (which
+            // would cancel the endpoint and desync the next command from
+            // leftover firmware bytes) — it only marks the download failed so
+            // the remaining bytes are drained and discarded; see
+            // `fail_download`.
+            if !self.finish_pending && self.download_active() && self.pending_fail_reply.is_none() {
                 let failed = match self.download.as_mut() {
                     Some(download) if download.is_open() => download.try_finished().and_then(Result::err),
                     _ => None,
                 };
                 if let Some(err) = failed {
                     log::error!("[{udc_name}] swupdate failed during download: {err}");
-                    self.reset(udc_name, Some(FAIL_EPIPE)).await;
-                    return;
+                    self.fail_download(FAIL_EPIPE).await;
                 }
             }
 
@@ -456,7 +482,10 @@ impl FastbootUsbState {
     /// connected session should keep serving: `false` means a hard failure
     /// occurred and `reset()` already tore the session down (and best-effort
     /// replied FAIL) — the caller must close the bulk endpoint and exit
-    /// `serve_connected`, not loop back and try to keep receiving.
+    /// `serve_connected`, not loop back and try to keep receiving. A
+    /// mid-download swupdate failure is *not* one of these: it drains and
+    /// discards the remaining announced bytes instead (see
+    /// `pending_fail_reply`) and keeps returning `true`.
     async fn handle_download_chunk(&mut self, udc_name: &str, chunk: BytesMut) -> bool {
         if chunk.is_empty() {
             return true;
@@ -468,6 +497,19 @@ impl FastbootUsbState {
         // the real boundary. Once swupdate is done (`Sent::Done`) we simply keep
         // draining and discarding.
         let chunk_len = chunk.len();
+
+        // swupdate already failed (or just failed on this very chunk, below):
+        // the boundary hasn't been reached yet, so keep draining and
+        // discarding instead of tearing down the endpoint mid-transfer.
+        if let Some(reply) = self.pending_fail_reply {
+            self.downloaded_size = self.downloaded_size.saturating_add(chunk_len);
+            if self.downloaded_size >= self.download_size {
+                log::warn!("[{udc_name}] fastboot-usb download data phase complete (swupdate already failed)");
+                let _ = send_static(&mut self.tx, reply).await;
+                self.reset_state();
+            }
+            return true;
+        }
 
         let Some(download) = self.download.as_mut() else {
             self.reset(udc_name, Some(FAIL_NOTOPEN)).await;
@@ -495,14 +537,23 @@ impl FastbootUsbState {
                 true
             }
             Err(err) => {
-                if err.kind() == io::ErrorKind::NotConnected {
-                    let _ = send_static(&mut self.tx, FAIL_NOTOPEN).await;
+                let reply = if err.kind() == io::ErrorKind::NotConnected {
+                    FAIL_NOTOPEN
                 } else {
                     log::error!("[{udc_name}] fastboot-usb write to SWUpdate failed: {err}");
-                    let _ = send_static(&mut self.tx, FAIL_EPIPE).await;
+                    FAIL_EPIPE
+                };
+                // This chunk was already consumed off the wire, so it counts
+                // towards the boundary like any other; the host is still
+                // mid-write and will keep sending the rest regardless, so
+                // drain and discard the remainder instead of resetting here.
+                self.downloaded_size = self.downloaded_size.saturating_add(chunk_len);
+                self.fail_download(reply).await;
+                if self.downloaded_size >= self.download_size {
+                    let _ = send_static(&mut self.tx, reply).await;
+                    self.reset_state();
                 }
-                self.reset(udc_name, None).await;
-                false
+                true
             }
         }
     }
