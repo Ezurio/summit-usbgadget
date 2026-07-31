@@ -77,16 +77,16 @@ async fn handle_fetch_command(state: &mut FastbootUsbState, udc_name: &str, targ
         FetchTarget::SysinfoJson => "sysinfo.json",
     };
 
-    // Serialize the JSON payload straight into the send buffer, after a 12-byte
-    // header placeholder, then backfill the `DATA%08X` header in place once the
-    // length is known — one buffer, one transfer, no separate payload copy.
-    let mut packet = b"DATA00000000".to_vec();
-    info.write_json(&mut packet);
-    let len = packet.len() - 12;
-    packet[..12].copy_from_slice(data_header(len).as_bytes());
+    let mut json = Vec::new();
+    info.write_json(&mut json);
+    let len = json.len();
 
-    log::warn!("[{udc_name}] fastboot reply tx: DATA{:08X} (fetch {target})", len);
-    if state.tx.send_async(Bytes::from(packet)).await.is_err() {
+    // Header and payload must be separate bulk transfers, or the host's two reads desync.
+    log::info!("[{udc_name}] fastboot reply tx: DATA{:08X} (fetch {target})", len);
+    if send_data_header(&mut state.tx, len).await.is_err() {
+        return false;
+    }
+    if state.tx.send_async(Bytes::from(json)).await.is_err() {
         return false;
     }
     log::warn!("[{udc_name}] fastboot reply tx: OKAY (fetch)");
