@@ -69,25 +69,13 @@ ast_enum_of_structs! {
         Tuple(TypeTuple),
 
         /// Tokens in type position not interpreted by Syn.
+        ///
+        /// <div class="warning">
+        ///
+        /// Important: see [Compatibility notes][crate#verbatim-variants].
+        ///
+        /// </div>
         Verbatim(TokenStream),
-
-        // For testing exhaustiveness in downstream code, use the following idiom:
-        //
-        //     match ty {
-        //         #![cfg_attr(test, deny(non_exhaustive_omitted_patterns))]
-        //
-        //         Type::Array(ty) => {...}
-        //         Type::FnPtr(ty) => {...}
-        //         ...
-        //         Type::Verbatim(ty) => {...}
-        //
-        //         _ => { /* some sane fallback */ }
-        //     }
-        //
-        // This way we fail your tests but don't break your library when adding
-        // a variant. You will be notified by a test failure when a variant is
-        // added, so that you can add code to handle it, but your library will
-        // continue to compile and work for downstream users in the interim.
     }
 }
 
@@ -309,7 +297,8 @@ ast_enum! {
 #[cfg(feature = "parsing")]
 pub(crate) mod parsing {
     use crate::attr::Attribute;
-    use crate::error::{self, Result};
+    use crate::buffer::Cursor;
+    use crate::error::{Error, Result};
     use crate::ext::IdentExt as _;
     use crate::generics::{BoundLifetimes, TraitBound, TraitBoundModifiers, TypeParamBound};
     use crate::ident::Ident;
@@ -328,7 +317,7 @@ pub(crate) mod parsing {
     use crate::verbatim;
     use alloc::boxed::Box;
     use alloc::vec::Vec;
-    use proc_macro2::{Span, TokenStream};
+    use proc_macro2::TokenStream;
 
     #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     impl Parse for Type {
@@ -547,15 +536,28 @@ pub(crate) mod parsing {
                 paren_token,
                 elem: Box::new(first),
             }))
+        } else if lookahead.peek(Token![unsafe]) && input.peek2(Token![<]) {
+            input.parse::<Token![unsafe]>()?;
+            input.parse::<Token![<]>()?;
+            while !input.peek(Token![>]) {
+                Lifetime::parse_any(input)?;
+                if input.peek(Token![>]) {
+                    break;
+                }
+                input.parse::<Token![,]>()?;
+            }
+            input.parse::<Token![>]>()?;
+            ambig_ty(input, allow_plus, allow_group_generic)?;
+            Ok(Type::Verbatim(verbatim::between(begin, input.cursor())))
         } else if lookahead.peek(Token![fn])
-            || lookahead.peek(Token![unsafe])
+            || input.peek(Token![unsafe])
             || lookahead.peek(Token![extern])
         {
             let mut fn_ptr: TypeFnPtr = input.parse()?;
             fn_ptr.lifetimes = lifetimes;
             Ok(Type::FnPtr(fn_ptr))
         } else if cfg!(feature = "full")
-            && token::parsing::peek_keyword(input.cursor(), "builtin")
+            && input.cursor().peek_keyword("builtin")
             && input.peek2(Token![#])
         {
             token::parsing::keyword(input, "builtin")?;
@@ -628,10 +630,10 @@ pub(crate) mod parsing {
 
             Ok(Type::Path(ty))
         } else if lookahead.peek(Token![dyn]) {
+            let dyn_begin = input.cursor();
             let dyn_token: Token![dyn] = input.parse()?;
-            let dyn_span = dyn_token.span;
             let star_token: Option<Token![*]> = input.parse()?;
-            let bounds = TypeTraitObject::parse_bounds(dyn_span, input, allow_plus)?;
+            let bounds = TypeTraitObject::parse_bounds(dyn_begin, input, allow_plus)?;
             Ok(if star_token.is_some() {
                 Type::Verbatim(verbatim::between(begin, input.cursor()))
             } else {
@@ -899,12 +901,9 @@ pub(crate) mod parsing {
 
         // Only allow multiple trait references if allow_plus is true.
         pub(crate) fn parse(input: ParseStream, allow_plus: bool) -> Result<Self> {
+            let dyn_begin = input.cursor();
             let dyn_token: Option<Token![dyn]> = input.parse()?;
-            let dyn_span = match &dyn_token {
-                Some(token) => token.span,
-                None => input.span(),
-            };
-            let bounds = Self::parse_bounds(dyn_span, input, allow_plus)?;
+            let bounds = Self::parse_bounds(dyn_begin, input, allow_plus)?;
             Ok(TypeTraitObject {
                 attrs: Vec::new(),
                 dyn_token,
@@ -913,7 +912,7 @@ pub(crate) mod parsing {
         }
 
         fn parse_bounds(
-            dyn_span: Span,
+            dyn_begin: Cursor,
             input: ParseStream,
             allow_plus: bool,
         ) -> Result<Punctuated<TypeParamBound, Token![+]>> {
@@ -925,7 +924,6 @@ pub(crate) mod parsing {
                 allow_precise_capture,
                 allow_const,
             )?;
-            let mut last_lifetime_span = None;
             let mut at_least_one_trait = false;
             for bound in &bounds {
                 match bound {
@@ -933,9 +931,7 @@ pub(crate) mod parsing {
                         at_least_one_trait = true;
                         break;
                     }
-                    TypeParamBound::Lifetime(lifetime) => {
-                        last_lifetime_span = Some(lifetime.ident.span());
-                    }
+                    TypeParamBound::Lifetime(_) => {}
                     TypeParamBound::PreciseCapture(_) | TypeParamBound::Verbatim(_) => {
                         unreachable!()
                     }
@@ -944,7 +940,7 @@ pub(crate) mod parsing {
             // Just lifetimes like `'a + 'b` is not a TraitObject.
             if !at_least_one_trait {
                 let msg = "at least one trait is required for an object type";
-                return Err(error::new2(dyn_span, last_lifetime_span.unwrap(), msg));
+                return Err(Error::new_range(dyn_begin..input.cursor(), msg));
             }
             Ok(bounds)
         }
@@ -966,6 +962,7 @@ pub(crate) mod parsing {
         }
 
         pub(crate) fn parse(input: ParseStream, allow_plus: bool) -> Result<Self> {
+            let impl_begin = input.cursor();
             let impl_token: Token![impl] = input.parse()?;
             let allow_precise_capture = true;
             let allow_const = true;
@@ -975,7 +972,6 @@ pub(crate) mod parsing {
                 allow_precise_capture,
                 allow_const,
             )?;
-            let mut last_nontrait_span = None;
             let mut at_least_one_trait = false;
             for bound in &bounds {
                 match bound {
@@ -983,20 +979,7 @@ pub(crate) mod parsing {
                         at_least_one_trait = true;
                         break;
                     }
-                    TypeParamBound::Lifetime(lifetime) => {
-                        last_nontrait_span = Some(lifetime.ident.span());
-                    }
-                    TypeParamBound::PreciseCapture(precise_capture) => {
-                        #[cfg(feature = "full")]
-                        {
-                            last_nontrait_span = Some(precise_capture.gt_token.span);
-                        }
-                        #[cfg(not(feature = "full"))]
-                        {
-                            _ = precise_capture;
-                            unreachable!();
-                        }
-                    }
+                    TypeParamBound::Lifetime(_) | TypeParamBound::PreciseCapture(_) => {}
                     TypeParamBound::Verbatim(_) => {
                         // `[const] Trait`
                         at_least_one_trait = true;
@@ -1006,11 +989,7 @@ pub(crate) mod parsing {
             }
             if !at_least_one_trait {
                 let msg = "at least one trait must be specified";
-                return Err(error::new2(
-                    impl_token.span,
-                    last_nontrait_span.unwrap(),
-                    msg,
-                ));
+                return Err(Error::new_range(impl_begin..input.cursor(), msg));
             }
             Ok(TypeImplTrait {
                 attrs: Vec::new(),

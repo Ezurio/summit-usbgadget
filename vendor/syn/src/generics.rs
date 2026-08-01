@@ -403,6 +403,14 @@ ast_enum_of_structs! {
         Trait(TraitBound),
         Lifetime(Lifetime),
         PreciseCapture(PreciseCapture),
+
+        /// Tokens in bound position not interpreted by Syn.
+        ///
+        /// <div class="warning">
+        ///
+        /// Important: see [Compatibility notes][crate#verbatim-variants].
+        ///
+        /// </div>
         Verbatim(TokenStream),
     }
 }
@@ -540,8 +548,6 @@ ast_struct! {
 #[cfg(feature = "parsing")]
 pub(crate) mod parsing {
     use crate::attr::Attribute;
-    #[cfg(feature = "full")]
-    use crate::error;
     use crate::error::{Error, Result};
     use crate::ext::IdentExt as _;
     use crate::generics::{
@@ -788,16 +794,13 @@ pub(crate) mod parsing {
             #[cfg(feature = "full")]
             {
                 if input.peek(Token![use]) {
+                    let precise_capture_begin = input.cursor();
                     let precise_capture: PreciseCapture = input.parse()?;
                     return if allow_precise_capture {
                         Ok(TypeParamBound::PreciseCapture(precise_capture))
                     } else {
                         let msg = "`use<...>` precise capturing syntax is not allowed here";
-                        Err(error::new2(
-                            precise_capture.use_token.span,
-                            precise_capture.gt_token.span,
-                            msg,
-                        ))
+                        Err(Error::new_range(precise_capture_begin..input.cursor(), msg))
                     };
                 }
             }

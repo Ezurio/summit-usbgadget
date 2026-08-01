@@ -288,6 +288,12 @@ ast_enum_of_structs! {
         Unsafe(ExprUnsafe),
 
         /// Tokens in expression position not interpreted by Syn.
+        ///
+        /// <div class="warning">
+        ///
+        /// Important: see [Compatibility notes][crate#verbatim-variants].
+        ///
+        /// </div>
         Verbatim(TokenStream),
 
         /// A while loop: `while expr { ... }`.
@@ -1907,8 +1913,7 @@ pub(crate) mod parsing {
             || input.peek(Token![async]) && (input.peek2(Token![|]) || input.peek2(Token![move]))
         {
             expr_closure(input, allow_struct).map(Expr::Closure)
-        } else if token::parsing::peek_keyword(input.cursor(), "builtin") && input.peek2(Token![#])
-        {
+        } else if input.cursor().peek_keyword("builtin") && input.peek2(Token![#]) {
             expr_builtin(input)
         } else if input.peek(Ident)
             || input.peek(Token![::])
@@ -2818,16 +2823,14 @@ pub(crate) mod parsing {
         let break_token: Token![break] = input.parse()?;
 
         let ahead = input.fork();
+        let label_begin = ahead.cursor();
         let label = Lifetime::parse_optional_any(&ahead);
         if label.is_some() && ahead.peek(Token![:]) {
             // Not allowed: `break 'label: loop {...}`
             // Parentheses are required. `break ('label: loop {...})`
             let _: Expr = input.parse()?;
-            let start_span = label.unwrap().apostrophe;
-            let end_span = input.cursor().prev_span();
-            return Err(crate::error::new2(
-                start_span,
-                end_span,
+            return Err(Error::new_range(
+                label_begin..input.cursor(),
                 "parentheses required",
             ));
         }

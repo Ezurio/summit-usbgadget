@@ -80,25 +80,13 @@ ast_enum_of_structs! {
         Use(ItemUse),
 
         /// Tokens forming an item not interpreted by Syn.
+        ///
+        /// <div class="warning">
+        ///
+        /// Important: see [Compatibility notes][crate#verbatim-variants].
+        ///
+        /// </div>
         Verbatim(TokenStream),
-
-        // For testing exhaustiveness in downstream code, use the following idiom:
-        //
-        //     match item {
-        //         #![cfg_attr(test, deny(non_exhaustive_omitted_patterns))]
-        //
-        //         Item::Const(item) => {...}
-        //         Item::Enum(item) => {...}
-        //         ...
-        //         Item::Verbatim(item) => {...}
-        //
-        //         _ => { /* some sane fallback */ }
-        //     }
-        //
-        // This way we fail your tests but don't break your library when adding
-        // a variant. You will be notified by a test failure when a variant is
-        // added, so that you can add code to handle it, but your library will
-        // continue to compile and work for downstream users in the interim.
     }
 }
 
@@ -729,25 +717,13 @@ ast_enum_of_structs! {
         Macro(ForeignItemMacro),
 
         /// Tokens in an `extern` block not interpreted by Syn.
+        ///
+        /// <div class="warning">
+        ///
+        /// Important: see [Compatibility notes][crate#verbatim-variants].
+        ///
+        /// </div>
         Verbatim(TokenStream),
-
-        // For testing exhaustiveness in downstream code, use the following idiom:
-        //
-        //     match item {
-        //         #![cfg_attr(test, deny(non_exhaustive_omitted_patterns))]
-        //
-        //         ForeignItem::Fn(item) => {...}
-        //         ForeignItem::Static(item) => {...}
-        //         ...
-        //         ForeignItem::Verbatim(item) => {...}
-        //
-        //         _ => { /* some sane fallback */ }
-        //     }
-        //
-        // This way we fail your tests but don't break your library when adding
-        // a variant. You will be notified by a test failure when a variant is
-        // added, so that you can add code to handle it, but your library will
-        // continue to compile and work for downstream users in the interim.
     }
 }
 
@@ -829,25 +805,13 @@ ast_enum_of_structs! {
         Macro(TraitItemMacro),
 
         /// Tokens within the definition of a trait not interpreted by Syn.
+        ///
+        /// <div class="warning">
+        ///
+        /// Important: see [Compatibility notes][crate#verbatim-variants].
+        ///
+        /// </div>
         Verbatim(TokenStream),
-
-        // For testing exhaustiveness in downstream code, use the following idiom:
-        //
-        //     match item {
-        //         #![cfg_attr(test, deny(non_exhaustive_omitted_patterns))]
-        //
-        //         TraitItem::Const(item) => {...}
-        //         TraitItem::Fn(item) => {...}
-        //         ...
-        //         TraitItem::Verbatim(item) => {...}
-        //
-        //         _ => { /* some sane fallback */ }
-        //     }
-        //
-        // This way we fail your tests but don't break your library when adding
-        // a variant. You will be notified by a test failure when a variant is
-        // added, so that you can add code to handle it, but your library will
-        // continue to compile and work for downstream users in the interim.
     }
 }
 
@@ -932,25 +896,13 @@ ast_enum_of_structs! {
         Macro(ImplItemMacro),
 
         /// Tokens within an impl block not interpreted by Syn.
+        ///
+        /// <div class="warning">
+        ///
+        /// Important: see [Compatibility notes][crate#verbatim-variants].
+        ///
+        /// </div>
         Verbatim(TokenStream),
-
-        // For testing exhaustiveness in downstream code, use the following idiom:
-        //
-        //     match item {
-        //         #![cfg_attr(test, deny(non_exhaustive_omitted_patterns))]
-        //
-        //         ImplItem::Const(item) => {...}
-        //         ImplItem::Fn(item) => {...}
-        //         ...
-        //         ImplItem::Verbatim(item) => {...}
-        //
-        //         _ => { /* some sane fallback */ }
-        //     }
-        //
-        // This way we fail your tests but don't break your library when adding
-        // a variant. You will be notified by a test failure when a variant is
-        // added, so that you can add code to handle it, but your library will
-        // continue to compile and work for downstream users in the interim.
     }
 }
 
@@ -1298,44 +1250,66 @@ pub(crate) mod parsing {
                 }
             }
         } else if lookahead.peek(Token![const]) {
-            let vis = input.parse()?;
+            let vis: Visibility = input.parse()?;
             let const_token: Token![const] = input.parse()?;
             let lookahead = input.lookahead1();
-            let ident = if lookahead.peek(Ident) || lookahead.peek(Token![_]) {
-                input.call(Ident::parse_any)?
+            if (lookahead.peek(Ident) && !(input.peek(Token![auto]) && input.peek2(Token![trait])))
+                || lookahead.peek(Token![_])
+            {
+                let ident = input.call(Ident::parse_any)?;
+                let mut generics: Generics = input.parse()?;
+                let colon_token = input.parse()?;
+                let ty = input.parse()?;
+                let value = if let Some(eq_token) = input.parse::<Option<Token![=]>>()? {
+                    let expr: Expr = input.parse()?;
+                    Some((eq_token, expr))
+                } else {
+                    None
+                };
+                generics.where_clause = input.parse()?;
+                let semi_token: Token![;] = input.parse()?;
+                match value {
+                    Some((eq_token, expr))
+                        if generics.lt_token.is_none() && generics.where_clause.is_none() =>
+                    {
+                        Ok(Item::Const(ItemConst {
+                            attrs: Vec::new(),
+                            vis,
+                            modifiers: ConstModifiers { defaultness: None },
+                            const_token,
+                            ident,
+                            generics,
+                            colon_token,
+                            ty,
+                            eq_token,
+                            expr: Box::new(expr),
+                            semi_token,
+                        }))
+                    }
+                    _ => Ok(Item::Verbatim(verbatim::between(begin, input.cursor()))),
+                }
+            } else if lookahead.peek(Token![trait])
+                || (lookahead.peek(Token![unsafe]) && !input.peek2(Token![impl]))
+                || lookahead.peek(Token![auto])
+            {
+                let has_impl_restriction = false;
+                parse_trait_or_trait_alias(input, Vec::new(), vis, has_impl_restriction)?;
+                Ok(Item::Verbatim(verbatim::between(begin, input.cursor())))
+            } else if lookahead.peek(Token![impl]) || input.peek(Token![unsafe]) {
+                let defaultness = None;
+                let unsafety: Option<Token![unsafe]> = input.parse()?;
+                let allow_verbatim_impl = true;
+                parse_impl(
+                    input,
+                    Vec::new(),
+                    defaultness,
+                    Some(const_token),
+                    unsafety,
+                    allow_verbatim_impl,
+                )?;
+                Ok(Item::Verbatim(verbatim::between(begin, input.cursor())))
             } else {
                 return Err(lookahead.error());
-            };
-            let mut generics: Generics = input.parse()?;
-            let colon_token = input.parse()?;
-            let ty = input.parse()?;
-            let value = if let Some(eq_token) = input.parse::<Option<Token![=]>>()? {
-                let expr: Expr = input.parse()?;
-                Some((eq_token, expr))
-            } else {
-                None
-            };
-            generics.where_clause = input.parse()?;
-            let semi_token: Token![;] = input.parse()?;
-            match value {
-                Some((eq_token, expr))
-                    if generics.lt_token.is_none() && generics.where_clause.is_none() =>
-                {
-                    Ok(Item::Const(ItemConst {
-                        attrs: Vec::new(),
-                        vis,
-                        modifiers: ConstModifiers { defaultness: None },
-                        const_token,
-                        ident,
-                        generics,
-                        colon_token,
-                        ty,
-                        eq_token,
-                        expr: Box::new(expr),
-                        semi_token,
-                    }))
-                }
-                _ => Ok(Item::Verbatim(verbatim::between(begin, input.cursor()))),
             }
         } else if lookahead.peek(Token![unsafe]) {
             ahead.parse::<Token![unsafe]>()?;
@@ -1344,9 +1318,19 @@ pub(crate) mod parsing {
                 || lookahead.peek(Token![auto]) && ahead.peek2(Token![trait])
             {
                 input.parse().map(Item::Trait)
-            } else if lookahead.peek(Token![impl]) {
+            } else if vis.is_inherited() && lookahead.peek(Token![impl]) {
+                let defaultness: Option<Token![default]> = None;
+                let constness: Option<Token![const]> = None;
+                let unsafety: Token![unsafe] = input.parse()?;
                 let allow_verbatim_impl = true;
-                if let Some(item) = parse_impl(input, allow_verbatim_impl)? {
+                if let Some(item) = parse_impl(
+                    input,
+                    Vec::new(),
+                    defaultness,
+                    constness,
+                    Some(unsafety),
+                    allow_verbatim_impl,
+                )? {
                     Ok(Item::Impl(item))
                 } else {
                     Ok(Item::Verbatim(verbatim::between(begin, input.cursor())))
@@ -1368,15 +1352,55 @@ pub(crate) mod parsing {
             input.parse().map(Item::Enum)
         } else if lookahead.peek(Token![union]) && ahead.peek2(Ident) {
             input.parse().map(Item::Union)
+        } else if lookahead.peek(Token![impl])
+            && ahead.peek2(token::Paren)
+            && (ahead.peek3(Token![const])
+                || ahead.peek3(Token![unsafe])
+                || ahead.peek3(Token![auto])
+                || ahead.peek3(Token![trait]))
+        {
+            let vis: Visibility = input.parse()?;
+            input.parse::<Token![impl]>()?;
+            let restriction;
+            parenthesized!(restriction in input);
+            let lookahead = restriction.lookahead1();
+            if lookahead.peek(Token![crate])
+                || lookahead.peek(Token![self])
+                || lookahead.peek(Token![super])
+            {
+                Ident::parse_any(&restriction)?;
+            } else if lookahead.peek(Token![in]) {
+                restriction.parse::<Token![in]>()?;
+                Path::parse_mod_style(&restriction)?;
+            } else {
+                return Err(lookahead.error());
+            }
+            input.parse::<Option<Token![const]>>()?;
+            let has_impl_restriction = true;
+            parse_trait_or_trait_alias(input, Vec::new(), vis, has_impl_restriction)?;
+            Ok(Item::Verbatim(verbatim::between(begin, input.cursor())))
         } else if lookahead.peek(Token![trait]) {
-            input.call(parse_trait_or_trait_alias)
+            let vis: Visibility = input.parse()?;
+            let has_impl_restriction = false;
+            parse_trait_or_trait_alias(input, Vec::new(), vis, has_impl_restriction)
         } else if lookahead.peek(Token![auto]) && ahead.peek2(Token![trait]) {
             input.parse().map(Item::Trait)
-        } else if lookahead.peek(Token![impl])
-            || lookahead.peek(Token![default]) && !ahead.peek2(Token![!])
+        } else if vis.is_inherited()
+            && (ahead.peek(Token![impl])
+                || lookahead.peek(Token![default]) && !ahead.peek2(Token![!]))
         {
+            let defaultness: Option<Token![default]> = input.parse()?;
+            let constness: Option<Token![const]> = input.parse()?;
+            let unsafety: Option<Token![unsafe]> = input.parse()?;
             let allow_verbatim_impl = true;
-            if let Some(item) = parse_impl(input, allow_verbatim_impl)? {
+            if let Some(item) = parse_impl(
+                input,
+                Vec::new(),
+                defaultness,
+                constness,
+                unsafety,
+                allow_verbatim_impl,
+            )? {
                 Ok(Item::Impl(item))
             } else {
                 Ok(Item::Verbatim(verbatim::between(begin, input.cursor())))
@@ -2188,8 +2212,7 @@ pub(crate) mod parsing {
                     }))
                 }
             } else if lookahead.peek(Token![static])
-                || ((ahead.peek(Token![unsafe])
-                    || token::parsing::peek_keyword(ahead.cursor(), "safe"))
+                || ((ahead.peek(Token![unsafe]) || ahead.peek(Token![safe]))
                     && ahead.peek2(Token![static]))
             {
                 let vis = input.parse()?;
@@ -2504,15 +2527,25 @@ pub(crate) mod parsing {
         }
     }
 
-    fn parse_trait_or_trait_alias(input: ParseStream) -> Result<Item> {
-        let (attrs, vis, trait_token, ident, generics) = parse_start_of_trait_alias(input)?;
+    fn parse_trait_or_trait_alias(
+        input: ParseStream,
+        attrs: Vec<Attribute>,
+        vis: Visibility,
+        has_impl_restriction: bool,
+    ) -> Result<Item> {
+        let unsafety: Option<Token![unsafe]> = input.parse()?;
+        let auto_token: Option<Token![auto]> = input.parse()?;
+        let trait_token: Token![trait] = input.parse()?;
+        let ident: Ident = input.parse()?;
+        let generics: Generics = input.parse()?;
         let lookahead = input.lookahead1();
-        if lookahead.peek(token::Brace)
+        if has_impl_restriction
+            || unsafety.is_some()
+            || auto_token.is_some()
+            || lookahead.peek(token::Brace)
             || lookahead.peek(Token![:])
             || lookahead.peek(Token![where])
         {
-            let unsafety = None;
-            let auto_token = None;
             parse_rest_of_trait(
                 input,
                 attrs,
@@ -2613,20 +2646,13 @@ pub(crate) mod parsing {
     #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     impl Parse for ItemTraitAlias {
         fn parse(input: ParseStream) -> Result<Self> {
-            let (attrs, vis, trait_token, ident, generics) = parse_start_of_trait_alias(input)?;
+            let attrs = input.call(Attribute::parse_outer)?;
+            let vis: Visibility = input.parse()?;
+            let trait_token: Token![trait] = input.parse()?;
+            let ident: Ident = input.parse()?;
+            let generics: Generics = input.parse()?;
             parse_rest_of_trait_alias(input, attrs, vis, trait_token, ident, generics)
         }
-    }
-
-    fn parse_start_of_trait_alias(
-        input: ParseStream,
-    ) -> Result<(Vec<Attribute>, Visibility, Token![trait], Ident, Generics)> {
-        let attrs = input.call(Attribute::parse_outer)?;
-        let vis: Visibility = input.parse()?;
-        let trait_token: Token![trait] = input.parse()?;
-        let ident: Ident = input.parse()?;
-        let generics: Generics = input.parse()?;
-        Ok((attrs, vis, trait_token, ident, generics))
     }
 
     fn parse_rest_of_trait_alias(
@@ -2646,7 +2672,7 @@ pub(crate) mod parsing {
             }
             bounds.push_value({
                 let allow_precise_capture = false;
-                let allow_const = false;
+                let allow_const = true;
                 TypeParamBound::parse_single(input, allow_precise_capture, allow_const)?
             });
             if input.peek(Token![where]) || input.peek(Token![;]) {
@@ -2917,16 +2943,32 @@ pub(crate) mod parsing {
     #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     impl Parse for ItemImpl {
         fn parse(input: ParseStream) -> Result<Self> {
+            let attrs = input.call(Attribute::parse_outer)?;
+            let defaultness: Option<Token![default]> = input.parse()?;
+            let constness: Option<Token![const]> = None;
+            let unsafety: Option<Token![unsafe]> = input.parse()?;
+
             let allow_verbatim_impl = false;
-            parse_impl(input, allow_verbatim_impl).map(Option::unwrap)
+            parse_impl(
+                input,
+                attrs,
+                defaultness,
+                constness,
+                unsafety,
+                allow_verbatim_impl,
+            )
+            .map(Option::unwrap)
         }
     }
 
-    fn parse_impl(input: ParseStream, allow_verbatim_impl: bool) -> Result<Option<ItemImpl>> {
-        let mut attrs = input.call(Attribute::parse_outer)?;
-        let has_visibility = allow_verbatim_impl && input.parse::<Visibility>()?.is_some();
-        let defaultness: Option<Token![default]> = input.parse()?;
-        let unsafety: Option<Token![unsafe]> = input.parse()?;
+    fn parse_impl(
+        input: ParseStream,
+        mut attrs: Vec<Attribute>,
+        defaultness: Option<Token![default]>,
+        constness: Option<Token![const]>,
+        unsafety: Option<Token![unsafe]>,
+        allow_verbatim_impl: bool,
+    ) -> Result<Option<ItemImpl>> {
         let impl_token: Token![impl] = input.parse()?;
 
         let has_generics = generics::parsing::choose_generics_over_qpath(input);
@@ -2936,22 +2978,15 @@ pub(crate) mod parsing {
             Generics::default()
         };
 
-        let is_const_impl = allow_verbatim_impl
-            && (input.peek(Token![const]) || input.peek(Token![?]) && input.peek2(Token![const]));
-        if is_const_impl {
-            input.parse::<Option<Token![?]>>()?;
-            input.parse::<Token![const]>()?;
-        }
-
         let polarity = if input.peek(Token![!]) && !input.peek2(token::Brace) {
             Some(input.parse::<Token![!]>()?)
         } else {
             None
         };
 
-        #[cfg(not(feature = "printing"))]
-        let first_ty_span = input.span();
+        let first_ty_begin = input.cursor();
         let mut first_ty: Type = input.parse()?;
+        let first_ty_end = input.cursor();
         let self_ty: Type;
         let trait_;
 
@@ -2982,10 +3017,10 @@ pub(crate) mod parsing {
                     unreachable!();
                 }
             } else if !allow_verbatim_impl {
-                #[cfg(feature = "printing")]
-                return Err(Error::new_spanned(first_ty_ref, "expected trait path"));
-                #[cfg(not(feature = "printing"))]
-                return Err(Error::new(first_ty_span, "expected trait path"));
+                return Err(Error::new_range(
+                    first_ty_begin..first_ty_end,
+                    "expected trait path",
+                ));
             } else {
                 trait_ = None;
             }
@@ -3011,7 +3046,7 @@ pub(crate) mod parsing {
             items.push(content.parse()?);
         }
 
-        if has_visibility || is_const_impl || is_impl_for && trait_.is_none() {
+        if constness.is_some() || is_impl_for && trait_.is_none() {
             Ok(None)
         } else {
             Ok(Some(ItemImpl {
