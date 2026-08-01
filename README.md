@@ -210,7 +210,7 @@ Top-level:
 - optional: `class`, `sub_class`, `protocol`
 - optional strings: `manufacturer`, `product_name`
 - source selectors: `product_name_source` (`custom` / `model`),
-  `serial_source` (`fuse_mac` / `wifi_mac`)
+  `serial_source` (`auto` / `wifi_mac`)
 
 `[[config]]`:
 
@@ -248,9 +248,9 @@ A `msd` function takes one or more `[[config.function.lun]]` tables with a
 
 ### Serial number
 
-- `fuse_mac` — use the reversed eth0 fuse MAC from the configured NVMEM cell.
+- `auto` — use the reversed eth0 fuse MAC from the configured NVMEM cell.
 - `wifi_mac` — use `/etc/wifi_mac`.
-- `fuse_mac` — read the 6-byte eth0 MAC from the configured NVMEM cell. The
+- `auto` — read the 6-byte eth0 MAC from the configured NVMEM cell. The
   eth1 MAC is read alongside it for future network identity use: the cells are
   `mac-address@514,0` / `mac-address@1514,0` on i.MX95,
   `mac-address@90,0` / `mac-address@96,0` on i.MX8MP, and `mac-address@90,0`

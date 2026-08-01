@@ -35,8 +35,8 @@ use usb_gadget::{
 
 use crate::config::{FunctionConfig, GadgetConfig, MsdConfig, NetConfig, SerialConfig};
 use crate::sysinfo::product;
-use crate::sysinfo::serial;
 use crate::udc::{self, Selection};
+use summit_usbgadget_config::sysinfo::resolve_serial;
 
 /// A pending Microsoft OS extended-compatibility descriptor for a network
 /// function, written to configfs after the gadget is registered.
@@ -258,7 +258,7 @@ fn build_on_udc_once(cfg: &GadgetConfig, udc: &Udc) -> Result<RunningGadget, Box
     let device = &cfg.device;
     let class =
         Class::new(device.class.unwrap_or(0), device.sub_class.unwrap_or(0), device.protocol.unwrap_or(0));
-    let serial_number = serial::resolve(device)?;
+    let serial_number = resolve_serial(device.serial_source.as_deref())?;
     let product_name = product::resolve(device)?;
     let strings = Strings::new(
         device.manufacturer.as_deref().unwrap_or(""),

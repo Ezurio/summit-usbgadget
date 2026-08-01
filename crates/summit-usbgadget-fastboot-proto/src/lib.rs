@@ -9,7 +9,7 @@
 //! append to commands. Nothing here touches a transport, so both the USB
 //! function and the TCP service reuse exactly the same command vocabulary.
 
-use summit_usbgadget_swupdate::sysinfo::{boot_info, fuse_serial, system_info_json};
+use summit_usbgadget_swupdate::sysinfo::{boot_info, system_info_json, SystemInfo};
 
 /// Fixed reply / info tokens shared by every fastboot transport. Grouped into
 /// one module so callers can `use fastboot_proto::reply::*;` instead of
@@ -184,13 +184,13 @@ pub fn parse_command(data: &[u8]) -> Option<(ParsedCommand, usize)> {
 
 /// Builds the reply for a fastboot `getvar:<name>` query, or `None` for
 /// variables this device does not expose.
-pub fn fastboot_getvar_reply(arg: &str, _serial: &str) -> Option<Vec<u8>> {
+pub fn fastboot_getvar_reply(arg: &str, serial: &str) -> Option<Vec<u8>> {
     match arg {
         "version" => Some(b"OKAY0.4".to_vec()),
         "max-download-size" => Some(b"OKAY400000000".to_vec()),
         "max-fetch-size" => Some(b"OKAY00010000".to_vec()),
-        "product" => Some(b"OKAYsummit-usbgadget".to_vec()),
-        "serialno" => Some(format!("OKAY{}", fuse_serial()).into_bytes()),
+        "product" => Some(format!("OKAY{}", SystemInfo::collect(None).model).into_bytes()),
+        "serialno" => Some(format!("OKAY{serial}").into_bytes()),
         "is-userspace" => Some(b"OKAYyes".to_vec()),
         "current-slot" => boot_info()
             .current_side_option()

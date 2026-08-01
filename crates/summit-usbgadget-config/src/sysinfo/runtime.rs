@@ -47,11 +47,10 @@ fn run_boot_rootfs() -> std::io::Result<BootRootfsInfo> {
 
 pub fn boot_info() -> &'static BootRootfsInfo { BOOT_INFO.get_or_init(|| run_boot_rootfs().unwrap_or_default()) }
 pub fn inactive_side(current_side: Option<&str>) -> &'static str { if current_side.unwrap_or("a") == "a" { "b" } else { "a" } }
-pub fn fuse_serial() -> String { super::nvmem::fuse_macs().and_then(|macs| macs.eth0).unwrap_or_default() }
 
 pub fn system_info_json() -> Vec<u8> {
     let mut json = Vec::new();
-    SystemInfo::collect(Some(fuse_serial())).write_json(&mut json);
+    SystemInfo::collect(None).write_json(&mut json);
     json
 }
 
@@ -59,6 +58,8 @@ pub fn system_info_json() -> Vec<u8> {
 pub struct SystemInfo {
     pub model: String,
     pub serial: String,
+    pub eth0: String,
+    pub eth1: String,
     pub soc: String,
     pub memory_mb: u64,
     pub hw_part_number: String,
@@ -67,7 +68,8 @@ pub struct SystemInfo {
 impl SystemInfo {
     pub fn collect(serial: Option<String>) -> Self {
         let base = base_info();
-        Self { model: base.model.clone().unwrap_or_default(), serial: serial.unwrap_or_default(), soc: base.soc.clone().unwrap_or_default(), memory_mb: base.memory_mb.unwrap_or_default(), hw_part_number: boot_info().hw_part_number.clone().unwrap_or_default() }
+        let macs = super::serial::macs().unwrap_or_default();
+        Self { model: base.model.clone().unwrap_or_default(), serial: serial.unwrap_or_else(|| super::serial::serial(&macs)), eth0: macs.eth0, eth1: macs.eth1, soc: base.soc.clone().unwrap_or_default(), memory_mb: base.memory_mb.unwrap_or_default(), hw_part_number: boot_info().hw_part_number.clone().unwrap_or_default() }
     }
     pub fn write_json(&self, out: &mut Vec<u8>) { let _ = serde_json::to_writer(out, self); }
 }
@@ -76,7 +78,7 @@ impl SystemInfo {
 struct BaseSystemInfo { model: Option<String>, soc: Option<String>, memory_mb: Option<u64> }
 fn base_info() -> &'static BaseSystemInfo {
     static BASE_INFO: OnceLock<BaseSystemInfo> = OnceLock::new();
-    BASE_INFO.get_or_init(|| BaseSystemInfo { model: read_dt_string("/sys/firmware/devicetree/base/model"), soc: super::nvmem::soc_id(), memory_mb: mem_total_mb() })
+    BASE_INFO.get_or_init(|| BaseSystemInfo { model: read_dt_string("/sys/firmware/devicetree/base/model"), soc: super::serial::soc_id(), memory_mb: mem_total_mb() })
 }
 fn read_dt_string(path: &str) -> Option<String> { let bytes = fs::read(path).ok()?; let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len()); let value = String::from_utf8_lossy(&bytes[..end]).trim().to_string(); (!value.is_empty()).then_some(value) }
 fn mem_total_mb() -> Option<u64> { let text = fs::read_to_string("/proc/meminfo").ok()?; let line = text.lines().find(|line| line.starts_with("MemTotal:"))?; let kb = line.strip_prefix("MemTotal:")?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok()?; Some(kb / 1024) }

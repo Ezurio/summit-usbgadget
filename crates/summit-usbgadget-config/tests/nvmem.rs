@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
 
-use summit_usbgadget_config::sysinfo::nvmem::format_serial_mac;
+use summit_usbgadget_config::sysinfo::format_serial_mac;
 
 #[test]
 fn rejects_non_mac_cell_lengths() {

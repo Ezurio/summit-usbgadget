@@ -7,4 +7,3 @@
 //! number.
 
 pub mod product;
-pub mod serial;
