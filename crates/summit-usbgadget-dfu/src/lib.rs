@@ -8,7 +8,7 @@ use bytes::Bytes;
 use serde::Deserialize;
 use std::future::Future;
 use summit_usbgadget_usb::registry::{FunctionBuildContext, GadgetService, RegisteredFunctionConfig};
-use summit_usbgadget_swupdate::sysinfo::SystemInfo;
+use summit_usbgadget_swupdate::sysinfo::system_info_json;
 use summit_usbgadget_swupdate::SwupdateConfig;
 
 mod handler;
@@ -50,13 +50,11 @@ impl Default for DfuFnConfig {
 
 impl DfuFnConfig {
 	/// Converts the parsed configuration into the runtime [`DfuConfig`].
-	pub fn to_config(&self, serial: &str) -> Result<DfuConfig, DfuConfigError> {
+	pub fn to_config(&self, _serial: &str) -> Result<DfuConfig, DfuConfigError> {
 		let upload = match self.upload.as_deref() {
 			None => None,
 			Some("sysinfo") => {
-				let mut json = Vec::new();
-				SystemInfo::collect(Some(serial.to_string())).write_json(&mut json);
-				Some(UploadSource::Data(Bytes::from(json)))
+				Some(UploadSource::Data(Bytes::from(system_info_json())))
 			}
 			Some(other) => return Err(DfuConfigError::UnsupportedUploadTarget(other.to_string())),
 		};

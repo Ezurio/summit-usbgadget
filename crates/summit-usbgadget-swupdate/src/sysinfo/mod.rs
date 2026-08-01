@@ -7,3 +7,4 @@
 mod runtime;
 
 pub use runtime::{boot_info, inactive_side, BootRootfsInfo, SystemInfo};
+pub use summit_usbgadget_config::sysinfo::{fuse_macs, fuse_serial, system_info_json};

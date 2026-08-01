@@ -15,7 +15,7 @@ use std::io::{self, ErrorKind};
 use bytes::BytesMut;
 use summit_usbgadget_fastboot_proto::reply::*;
 use summit_usbgadget_fastboot_proto::{data_header, fastboot_getvar_reply, parse_command, DownloadKind, FetchTarget, FlashTarget, ParsedCommand};
-use summit_usbgadget_swupdate::sysinfo::SystemInfo;
+use summit_usbgadget_swupdate::sysinfo::system_info_json;
 use summit_usbgadget_swupdate::{pump_to_swupdate, NextSwupdateBlock, PumpToSwupdateEnd, SwupdateParams, SwupdatePumpSource, SwupdateSession};
 
 use crate::transport::FastbootFraming;
@@ -125,7 +125,7 @@ impl<'a> TcpFastbootSession<'a> {
         // length-prefix placeholder, then backfill the prefix and send the whole
         // frame in one write — no intermediate payload buffer, no split writes.
         let mut frame = vec![0u8; 8];
-        SystemInfo::collect(Some(self.config.serial.clone())).write_json(&mut frame);
+        frame.extend_from_slice(&system_info_json());
         let len = frame.len() - 8;
         frame[..8].copy_from_slice(&(len as u64).to_be_bytes());
         log::info!("fastboot-tcp {}: fetch {label} ({len} bytes)", self.peer);

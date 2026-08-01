@@ -26,6 +26,8 @@ use std::pin::Pin;
 use serde::de::DeserializeOwned;
 use toml::{Table, Value};
 
+pub mod sysinfo;
+
 /// The future produced by a registered [`Service`].
 pub type ServiceFuture = Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>>>>;
 

@@ -9,7 +9,7 @@
 //! append to commands. Nothing here touches a transport, so both the USB
 //! function and the TCP service reuse exactly the same command vocabulary.
 
-use summit_usbgadget_swupdate::sysinfo::{boot_info, SystemInfo};
+use summit_usbgadget_swupdate::sysinfo::{boot_info, fuse_serial, system_info_json};
 
 /// Fixed reply / info tokens shared by every fastboot transport. Grouped into
 /// one module so callers can `use fastboot_proto::reply::*;` instead of
@@ -105,7 +105,11 @@ pub fn parse_command(data: &[u8]) -> Option<(ParsedCommand, usize)> {
     let (command, consumed) = if let Some(colon) = rest.iter().position(|b| *b == b':') {
         let name = &rest[..colon];
         let args = &rest[colon + 1..];
-        let token_len = || args.iter().position(|b| is_padding_byte(*b)).unwrap_or(args.len());
+        let token_len = || {
+            args.iter()
+                .position(|b| is_padding_byte(*b))
+                .unwrap_or(args.len())
+        };
 
         let (command, arg_len) = match name {
             b"download" | b"donwload" => {
@@ -115,15 +119,27 @@ pub fn parse_command(data: &[u8]) -> Option<(ParsedCommand, usize)> {
                 // be sliced directly rather than scanned for.
                 let percent = name == b"download" && args.starts_with(b"%");
                 let size_start = percent as usize;
-                let size = std::str::from_utf8(args.get(size_start..size_start + DOWNLOAD_SIZE_WIDTH)?).ok()?;
+                let size =
+                    std::str::from_utf8(args.get(size_start..size_start + DOWNLOAD_SIZE_WIDTH)?)
+                        .ok()?;
                 let len = usize::from_str_radix(size, 16).ok()?;
-                let kind = if percent { DownloadKind::Fastboot } else { DownloadKind::Plain };
-                (ParsedCommand::Download { len, kind }, size_start + DOWNLOAD_SIZE_WIDTH)
+                let kind = if percent {
+                    DownloadKind::Fastboot
+                } else {
+                    DownloadKind::Plain
+                };
+                (
+                    ParsedCommand::Download { len, kind },
+                    size_start + DOWNLOAD_SIZE_WIDTH,
+                )
             }
             b"WOpen" if args.is_empty() => (ParsedCommand::WOpen, 0),
             b"getvar" => {
                 let len = token_len();
-                match std::str::from_utf8(&args[..len]).ok().filter(|arg| !arg.is_empty()) {
+                match std::str::from_utf8(&args[..len])
+                    .ok()
+                    .filter(|arg| !arg.is_empty())
+                {
                     Some(arg) => (ParsedCommand::GetVar(arg.to_owned()), len),
                     None => (ParsedCommand::Unsupported, len),
                 }
@@ -152,7 +168,10 @@ pub fn parse_command(data: &[u8]) -> Option<(ParsedCommand, usize)> {
         (command, colon + 1 + arg_len)
     } else {
         // No colon at all: the only valid command in this form is "Close".
-        let len = rest.iter().position(|b| is_padding_byte(*b)).unwrap_or(rest.len());
+        let len = rest
+            .iter()
+            .position(|b| is_padding_byte(*b))
+            .unwrap_or(rest.len());
         let command = if &rest[..len] == b"Close" {
             ParsedCommand::Close
         } else {
@@ -165,15 +184,17 @@ pub fn parse_command(data: &[u8]) -> Option<(ParsedCommand, usize)> {
 
 /// Builds the reply for a fastboot `getvar:<name>` query, or `None` for
 /// variables this device does not expose.
-pub fn fastboot_getvar_reply(arg: &str, serial: &str) -> Option<Vec<u8>> {
+pub fn fastboot_getvar_reply(arg: &str, _serial: &str) -> Option<Vec<u8>> {
     match arg {
         "version" => Some(b"OKAY0.4".to_vec()),
         "max-download-size" => Some(b"OKAY400000000".to_vec()),
         "max-fetch-size" => Some(b"OKAY00010000".to_vec()),
         "product" => Some(b"OKAYsummit-usbgadget".to_vec()),
-        "serialno" => Some(format!("OKAY{serial}").into_bytes()),
+        "serialno" => Some(format!("OKAY{}", fuse_serial()).into_bytes()),
         "is-userspace" => Some(b"OKAYyes".to_vec()),
-        "current-slot" => boot_info().current_side_option().map(|side| format!("OKAY{side}").into_bytes()),
+        "current-slot" => boot_info()
+            .current_side_option()
+            .map(|side| format!("OKAY{side}").into_bytes()),
         "slot-num" => {
             let num = if boot_info().is_single_slot() { 1 } else { 2 };
             Some(format!("OKAY{num}").into_bytes())
@@ -184,8 +205,7 @@ pub fn fastboot_getvar_reply(arg: &str, serial: &str) -> Option<Vec<u8>> {
         "partition-type:update" | "partition-type:swu" => Some(b"OKAYraw".to_vec()),
         "partition-size:update" | "partition-size:swu" => Some(b"OKAY400000000".to_vec()),
         "partition-size:sysinfo" | "partition-size:sysinfo.json" => {
-            let mut json = Vec::new();
-            SystemInfo::collect(Some(serial.to_owned())).write_json(&mut json);
+            let json = system_info_json();
             Some(format!("OKAY{:08X}", json.len()).into_bytes())
         }
         _ => None,

@@ -14,6 +14,7 @@ log.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+summit-usbgadget-config.workspace = true
 swupdate-ipc.workspace = true
 tokio.workspace = true
 

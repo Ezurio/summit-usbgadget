@@ -208,9 +208,9 @@ Top-level:
 
 - required: `vendor`, `product`
 - optional: `class`, `sub_class`, `protocol`
-- optional strings: `manufacturer`, `product_name`, `serial`
+- optional strings: `manufacturer`, `product_name`
 - source selectors: `product_name_source` (`custom` / `model`),
-  `serial_source` (`auto` / `custom` / `uboot_ethaddr` / `uboot_eth1addr`)
+  `serial_source` (`fuse_mac` / `wifi_mac`)
 
 `[[config]]`:
 
@@ -248,13 +248,17 @@ A `msd` function takes one or more `[[config.function.lun]]` tables with a
 
 ### Serial number
 
-`device.serial_source` selects how the serial number is derived, mirroring the
-summit-usbgadget script:
-
-- `custom` (default when `serial` is set) — use `device.serial` verbatim.
-- `auto` (default when `serial` is unset) — first available of `/etc/wifi_mac`,
-  `/sys/devices/soc0/soc_uid`, `eth1`/`eth0` MAC (colons stripped), else
-  `deadbeefdeadbeef`.
+- `fuse_mac` — use the reversed eth0 fuse MAC from the configured NVMEM cell.
+- `wifi_mac` — use `/etc/wifi_mac`.
+- `fuse_mac` — read the 6-byte eth0 MAC from the configured NVMEM cell. The
+  eth1 MAC is read alongside it for future network identity use: the cells are
+  `mac-address@514,0` / `mac-address@1514,0` on i.MX95,
+  `mac-address@90,0` / `mac-address@96,0` on i.MX8MP, and `mac-address@90,0`
+  on i.MX8MM, and
+  `mac-address@4ec,0` / `mac-address@4f2,0` on i.MX93,
+  `mac-address@0,0` / `mac-address@0,6` on AM62X/J722S, and
+  `/sys/bus/nvmem/devices/0-00500/of_node/mac-address@2` /
+  `mac-address@8` on SOM60.
 - `uboot_ethaddr` / `uboot_eth1addr` — the U-Boot environment variable read via
   `fw_printenv`, lowercased with colons stripped.
 

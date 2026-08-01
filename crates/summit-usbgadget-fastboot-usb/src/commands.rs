@@ -3,7 +3,7 @@ use std::io;
 use bytes::{Bytes, BytesMut};
 
 use summit_usbgadget_swupdate::SwupdateSession;
-use summit_usbgadget_swupdate::sysinfo::SystemInfo;
+use summit_usbgadget_swupdate::sysinfo::system_info_json;
 use usb_gadget::function::custom::EndpointSender;
 
 use crate::send_static;
@@ -71,14 +71,12 @@ async fn handle_wopen_command(state: &mut FastbootUsbState, udc_name: &str) -> b
 }
 
 async fn handle_fetch_command(state: &mut FastbootUsbState, udc_name: &str, target: FetchTarget) -> bool {
-    let info = SystemInfo::collect(Some(state.serial.clone()));
     let target = match target {
         FetchTarget::Sysinfo => "sysinfo",
         FetchTarget::SysinfoJson => "sysinfo.json",
     };
 
-    let mut json = Vec::new();
-    info.write_json(&mut json);
+    let json = system_info_json();
     let len = json.len();
 
     // Header and payload must be separate bulk transfers, or the host's two reads desync.

@@ -23,10 +23,7 @@ product = 0x6089
 manufacturer = "Ezurio"
 product_name = "Composite DFU gadget"
 # product_name_source = "custom"  # custom (use product_name) | model (device-tree model)
-serial = "0001"
-# serial_source = "auto"      # auto | custom | uboot_ethaddr | uboot_eth1addr
-#   auto  : /etc/wifi_mac -> soc_uid -> eth1 -> eth0 -> deadbeefdeadbeef
-#   custom: use the `serial` value above verbatim (default when `serial` is set)
+# serial_source = "fuse_mac"  # fuse_mac | wifi_mac
 class = 0xef                  # miscellaneous device (uses IADs)
 sub_class = 2
 protocol = 1

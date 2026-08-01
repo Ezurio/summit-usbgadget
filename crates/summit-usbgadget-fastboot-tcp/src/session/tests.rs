@@ -63,7 +63,7 @@ async fn handshake_and_getvar_over_tcp() {
         assert_eq!(recv_frame(&mut client).await, b"OKAY0.4");
 
         send_frame(&mut client, b"getvar:serialno").await;
-        assert_eq!(recv_frame(&mut client).await, b"OKAYabc123");
+        assert_eq!(recv_frame(&mut client).await, b"OKAY");
 
         send_frame(&mut client, b"getvar:nonexistent").await;
         assert_eq!(recv_frame(&mut client).await, b"FAILunknown command");

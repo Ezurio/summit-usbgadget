@@ -17,15 +17,24 @@ use crate::config::DeviceConfig;
 /// The source defaults to `custom` when `product_name` is set and `model`
 /// otherwise, matching the legacy shell implementation.
 pub fn resolve(device: &DeviceConfig) -> Result<String, Box<dyn Error>> {
-    let default_source = if device.product_name.is_some() { "custom" } else { "model" };
-    let source = device.product_name_source.as_deref().unwrap_or(default_source);
+    let default_source = if device.product_name.is_some() {
+        "custom"
+    } else {
+        "model"
+    };
+    let source = device
+        .product_name_source
+        .as_deref()
+        .unwrap_or(default_source);
 
     match source {
         "custom" => device
             .product_name
             .clone()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| "product_name_source = \"custom\" requires a non-empty `product_name`".into()),
+            .ok_or_else(|| {
+                "product_name_source = \"custom\" requires a non-empty `product_name`".into()
+            }),
         "model" => Ok(read_model().unwrap_or_default()),
         other => Err(format!("invalid product_name_source: {other}").into()),
     }
