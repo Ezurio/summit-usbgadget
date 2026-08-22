@@ -54,14 +54,6 @@ pub enum FetchTarget {
     SysinfoJson,
 }
 
-/// Target partition of a fastboot `flash:` request.
-pub enum FlashTarget {
-    /// `flash:update`
-    Update,
-    /// `flash:swu`
-    Swu,
-}
-
 /// A parsed FBK / fastboot command.
 pub enum ParsedCommand {
     /// `WOpen:` — open an FBK download session.
@@ -79,10 +71,12 @@ pub enum ParsedCommand {
         /// Whether the transfer is a fastboot or plain FBK download.
         kind: DownloadKind,
     },
-    /// `flash:<target>` — install the previously downloaded image.
-    Flash(FlashTarget),
-    /// `flash:<unknown>` — flash of an unsupported partition.
-    FlashUnknownPart,
+    /// `flash:<partition>` — install the previously downloaded image. The
+    /// partition name is not validated: by the time this arrives the image
+    /// was already streamed to SWUpdate in full during the download phase,
+    /// so rejecting an unrecognized name here can no longer prevent
+    /// anything, it would only strand the finished transfer.
+    Flash,
     /// `Close` — finish an FBK download session.
     Close,
     /// A command this device does not implement.
@@ -154,15 +148,7 @@ pub fn parse_command(data: &[u8]) -> Option<(ParsedCommand, usize)> {
                 };
                 (command, len)
             }
-            b"flash" => {
-                let len = token_len();
-                let command = match &args[..len] {
-                    b"update" => ParsedCommand::Flash(FlashTarget::Update),
-                    b"swu" => ParsedCommand::Flash(FlashTarget::Swu),
-                    _ => ParsedCommand::FlashUnknownPart,
-                };
-                (command, len)
-            }
+            b"flash" => (ParsedCommand::Flash, token_len()),
             _ => (ParsedCommand::Unsupported, token_len()),
         };
         (command, colon + 1 + arg_len)
