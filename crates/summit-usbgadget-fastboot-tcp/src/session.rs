@@ -14,7 +14,7 @@ use std::io::{self, ErrorKind};
 
 use bytes::BytesMut;
 use summit_usbgadget_fastboot_proto::reply::*;
-use summit_usbgadget_fastboot_proto::{data_header, fastboot_getvar_reply, parse_command, DownloadKind, FetchTarget, FlashTarget, ParsedCommand};
+use summit_usbgadget_fastboot_proto::{data_header, fastboot_getvar_reply, parse_command, DownloadKind, FetchTarget, ParsedCommand};
 use summit_usbgadget_swupdate::sysinfo::system_info_json;
 use summit_usbgadget_swupdate::{pump_to_swupdate, NextSwupdateBlock, PumpToSwupdateEnd, SwupdateParams, SwupdatePumpSource, SwupdateSession};
 
@@ -89,8 +89,7 @@ impl<'a> TcpFastbootSession<'a> {
             ParsedCommand::Fetch(target) => self.handle_fetch(target).await,
             ParsedCommand::FetchUnknownPart => self.transport.send_packet(FAIL_UNKNOWN_PART).await,
             ParsedCommand::Download { len, kind } => self.handle_download(len, kind).await,
-            ParsedCommand::Flash(target) => self.handle_flash(target).await,
-            ParsedCommand::FlashUnknownPart => self.transport.send_packet(FAIL_UNKNOWN_PART).await,
+            ParsedCommand::Flash => self.handle_flash().await,
             ParsedCommand::Close => self.finish_download().await,
             ParsedCommand::Unsupported => {
                 log::warn!("fastboot-tcp {} unsupported command: {}", self.peer, String::from_utf8_lossy(cmd));
@@ -189,15 +188,11 @@ impl<'a> TcpFastbootSession<'a> {
         self.transport.send_packet(OKAY).await
     }
 
-    async fn handle_flash(&mut self, target: FlashTarget) -> io::Result<()> {
+    async fn handle_flash(&mut self) -> io::Result<()> {
         if !self.fastboot_pending_flash {
             return self.transport.send_packet(FAIL_FLASH).await;
         }
-        let label = match target {
-            FlashTarget::Update => "update",
-            FlashTarget::Swu => "swu",
-        };
-        log::info!("fastboot-tcp {}: flash {label}", self.peer);
+        log::info!("fastboot-tcp {}: flash command received", self.peer);
         self.transport.send_packet(INFO_WAIT_SWUPDATE).await?;
         self.finish_download().await
     }

@@ -9,7 +9,7 @@ use usb_gadget::function::custom::EndpointSender;
 use crate::send_static;
 use summit_usbgadget_fastboot_proto::{
     data_header, fastboot_getvar_reply, parse_command, DownloadKind, FetchTarget,
-    FlashTarget, ParsedCommand,
+    ParsedCommand,
 };
 use super::{
     FastbootUsbState, FAIL_BADSIZE, FAIL_CLOSE, FAIL_CMD, FAIL_FLASH,
@@ -131,7 +131,7 @@ async fn start_download_transfer(
     true
 }
 
-async fn finish_flash_download(state: &mut FastbootUsbState, udc_name: &str, target: FlashTarget) -> bool {
+async fn finish_flash_download(state: &mut FastbootUsbState, udc_name: &str) -> bool {
     if !state.fastboot_pending_flash {
         let _ = send_static(&mut state.tx, FAIL_FLASH).await;
         return false;
@@ -141,11 +141,7 @@ async fn finish_flash_download(state: &mut FastbootUsbState, udc_name: &str, tar
         return false;
     }
 
-    let target = match target {
-        FlashTarget::Update => "update",
-        FlashTarget::Swu => "swu",
-    };
-    log::warn!("[{udc_name}] fastboot flash command received: {target}");
+    log::warn!("[{udc_name}] fastboot flash command received");
     let _ = send_static(&mut state.tx, INFO_WAIT_SWUPDATE).await;
     if !start_finish_download_command(state, udc_name, "fastboot flash/finish").await {
         state.fastboot_pending_flash = false;
@@ -195,11 +191,7 @@ pub(super) async fn handle_command_chunk(
             false
         }
         ParsedCommand::Download { len, kind } => start_download_transfer(state, udc_name, len, kind).await,
-        ParsedCommand::Flash(target) => finish_flash_download(state, udc_name, target).await,
-        ParsedCommand::FlashUnknownPart => {
-            let _ = send_static(&mut state.tx, FAIL_UNKNOWN_PART).await;
-            false
-        }
+        ParsedCommand::Flash => finish_flash_download(state, udc_name).await,
         ParsedCommand::Close => handle_close_command(state, udc_name).await,
         ParsedCommand::Unsupported => {
             log::warn!("[{udc_name}] unsupported fastboot-usb command: {cmd}");
