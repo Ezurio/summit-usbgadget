@@ -43,7 +43,7 @@ pub fn macs() -> Option<MacAddresses> {
         "i.MX8MP" => read_cell_macs(IMX8MP_MAC_CELLS),
         "i.MX8MM" => read_single_cell_mac(IMX8MM_ETH0_MAC_CELL),
         "i.MX91" | "i.MX93" => read_cell_macs(IMX93_MAC_CELLS),
-        "AM62X" | "J722S" => read_cell_macs(AM62X_MAC_CELLS),
+        "AM62X" | "J722S" | "AM62LX" => read_cell_macs(AM62X_MAC_CELLS),
         "sama5d36" => read_cell_macs(SOM60_MAC_CELLS),
         "sama5d31" => read_uboot_mac("ethaddr"),
         _ => return None,
@@ -109,9 +109,17 @@ pub fn resolve_serial(serial_source: Option<&str>) -> Result<String, String> {
         other => log::warn!("invalid serial_source: {other}; falling back to auto"),
     }
 
-    macs()
-        .and_then(|macs| (!macs.eth0.is_empty()).then_some(macs.eth0))
-        .ok_or_else(|| "serial_source = \"auto\" but no supported fuse MAC is available".to_string())
+    Ok(macs().and_then(|macs| (!macs.eth0.is_empty()).then_some(macs.eth0)).unwrap_or_else(|| {
+        log::warn!("serial_source = \"auto\" but no supported fuse MAC is available; using random serial");
+        random_serial()
+    }))
+}
+
+fn random_serial() -> String {
+    let mut bytes = [0u8; 6];
+    let _: usize = rustix::rand::getrandom(&mut bytes, rustix::rand::GetRandomFlags::empty())
+        .expect("getrandom(2) failed");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn normalize(value: &str) -> String {
