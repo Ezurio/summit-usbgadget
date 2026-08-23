@@ -509,6 +509,7 @@ dependencies = [
  "futures-util",
  "inventory",
  "log",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",

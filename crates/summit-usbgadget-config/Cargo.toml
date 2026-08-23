@@ -15,6 +15,7 @@ path = "src/lib.rs"
 futures-util.workspace = true
 inventory.workspace = true
 log.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
