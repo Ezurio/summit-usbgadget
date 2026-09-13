@@ -4,6 +4,7 @@ use crate::{
         DeviceDescriptor, InterfaceDescriptor, DESCRIPTOR_TYPE_STRING,
     },
     io::{EndpointRead, EndpointWrite},
+    maybe_future::{NonWasmSend, NonWasmSync},
     platform,
     transfer::{
         Buffer, BulkOrInterrupt, Completion, ControlIn, ControlOut, Direction, EndpointDirection,
@@ -21,6 +22,12 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+
+#[cfg(target_arch = "wasm32")]
+use web_sys::UsbDevice;
+
+#[cfg(all(docsrs, not(target_arch = "wasm32")))]
+struct UsbDevice();
 
 /// An opened USB device.
 ///
@@ -52,7 +59,7 @@ impl Device {
     }
 
     pub(crate) fn open(d: &DeviceInfo) -> impl MaybeFuture<Output = Result<Device, Error>> {
-        platform::Device::from_device_info(d).map(|d| d.map(Device::wrap))
+        platform::Device::from_device_info(d).map_ok(Device::wrap)
     }
 
     /// Wrap a usbdevfs file descriptor that is already open.
@@ -64,9 +71,17 @@ impl Device {
     /// etc.
     ///
     /// *Supported on Linux and Android only.*
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(any(docsrs, target_os = "android", target_os = "linux"))]
     pub fn from_fd(fd: std::os::fd::OwnedFd) -> impl MaybeFuture<Output = Result<Device, Error>> {
-        platform::Device::from_fd(fd).map(|d| d.map(Device::wrap))
+        platform::Device::from_fd(fd).map_ok(Device::wrap)
+    }
+
+    /// Wrap a [`web_sys::UsbDevice`] object obtained from JS.
+    ///
+    /// *Supported on wasm only.*
+    #[cfg(any(docsrs, target_arch = "wasm32"))]
+    pub fn from_js(device: UsbDevice) -> impl MaybeFuture<Output = Result<Device, Error>> {
+        platform::Device::from_js(device).map_ok(Device::wrap)
     }
 
     /// Open an interface of the device and claim it for exclusive use.
@@ -77,7 +92,7 @@ impl Device {
         self.backend
             .clone()
             .claim_interface(interface)
-            .map(|i| i.map(Interface::wrap))
+            .map_ok(Interface::wrap)
     }
 
     /// Detach kernel drivers and open an interface of the device and claim it for exclusive use.
@@ -92,7 +107,7 @@ impl Device {
         self.backend
             .clone()
             .detach_and_claim_interface(interface)
-            .map(|i| i.map(Interface::wrap))
+            .map_ok(Interface::wrap)
     }
 
     /// Detach kernel drivers for the specified interface.
@@ -194,7 +209,7 @@ impl Device {
             self.backend
                 .clone()
                 .get_descriptor(desc_type, desc_index, language_id)
-                .map(|r| r.map_err(GetDescriptorError::Transfer))
+                .map_err(GetDescriptorError::Transfer)
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -213,7 +228,7 @@ impl Device {
                 },
                 timeout,
             )
-            .map(|r| r.map_err(GetDescriptorError::Transfer))
+            .map_err(GetDescriptorError::Transfer)
         }
     }
 
@@ -308,7 +323,13 @@ impl Device {
     ///
     /// * Not supported on Windows. You must [claim an interface][`Device::claim_interface`]
     ///   and use the interface handle to submit transfers.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "android"))]
+    #[cfg(any(
+        docsrs,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "android",
+        target_arch = "wasm32"
+    ))]
     pub fn control_in(
         &self,
         data: ControlIn,
@@ -345,7 +366,13 @@ impl Device {
     ///
     /// * Not supported on Windows. You must [claim an interface][`Device::claim_interface`]
     ///   and use the interface handle to submit transfers.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "android"))]
+    #[cfg(any(
+        docsrs,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "android",
+        target_arch = "wasm32"
+    ))]
     pub fn control_out(
         &self,
         data: ControlOut,
@@ -536,6 +563,19 @@ impl Interface {
             ep_dir: PhantomData,
         })
     }
+
+    /// Release the interface.
+    ///
+    /// Returns an error (`ErrorKind::Busy`) if any other reference to this
+    /// `Interface` still exists, including those from `Endpoint`s or their
+    /// pending transfers. Errors from disconnected devices are silently
+    /// ignored.
+    ///
+    /// This is the same as what occurs on `Drop` of the last clone of the
+    /// `Interface`, but allows it to be called asynchronously.
+    pub fn release(self) -> impl MaybeFuture<Output = Result<(), Error>> {
+        self.backend.release()
+    }
 }
 
 impl Debug for Interface {
@@ -676,6 +716,10 @@ impl<EpType: EndpointType, Dir: EndpointDirection> Endpoint<EpType, Dir> {
     /// The transfers are cancelled asynchronously. Once cancelled, they will be
     /// returned from calls to `next_complete` so you can tell which were
     /// completed, partially-completed, or cancelled.
+    ///
+    /// Platform-specific notes:
+    /// - This is not supported on WebUSB, because [it does not expose a transfer cancellation API](https://github.com/WICG/webusb/issues/25).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn cancel_all(&mut self) {
         self.backend.cancel_all()
     }
@@ -776,7 +820,9 @@ impl<EpType: BulkOrInterrupt, Dir: EndpointDirection> Endpoint<EpType, Dir> {
     /// ## Panics
     /// * if there are no transfers pending (that is, if [`Self::pending()`]
     ///   would return 0).
-    pub fn next_complete(&mut self) -> impl Future<Output = Completion> + Send + Sync + '_ {
+    pub fn next_complete(
+        &mut self,
+    ) -> impl Future<Output = Completion> + NonWasmSend + NonWasmSync + '_ {
         poll_fn(|cx| self.poll_next_complete(cx))
     }
 
@@ -803,6 +849,7 @@ impl<EpType: BulkOrInterrupt, Dir: EndpointDirection> Endpoint<EpType, Dir> {
     /// ## Panics
     ///  * if there are no transfers pending (that is, if [`Self::pending()`]
     ///    would return 0).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn wait_next_complete(&mut self, timeout: Duration) -> Option<Completion> {
         self.backend.wait_next_complete(timeout)
     }
@@ -821,6 +868,7 @@ impl<EpType: BulkOrInterrupt, Dir: EndpointDirection> Endpoint<EpType, Dir> {
     ///
     /// ## Panics
     ///  * if any transfer is already pending.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn transfer_blocking(&mut self, buf: Buffer, timeout: Duration) -> Completion {
         assert!(self.pending() == 0, "a transfer is already pending");
         self.submit(buf);

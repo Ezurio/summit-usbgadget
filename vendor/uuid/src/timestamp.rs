@@ -221,10 +221,19 @@ impl TryFrom<std::time::SystemTime> for Timestamp {
 
 #[cfg(feature = "std")]
 impl From<Timestamp> for std::time::SystemTime {
+    /// Perform the conversion.
+    ///
+    /// If the conversion would fail, an undefined `SystemTime` will be returned instead.
+    /// This can happen if the `Timestamp` would overflow the max value allowed by `SystemTime` on the target platform.
+    /// Use `TryFrom` to catch conversion failures and handle them explicitly.
     fn from(ts: Timestamp) -> Self {
         let (seconds, subsec_nanos) = ts.to_unix();
 
-        Self::UNIX_EPOCH + std::time::Duration::new(seconds, subsec_nanos)
+        // NOTE: The actual value on overflow is undefined and may change
+        // See: https://github.com/rust-lang/rust/issues/151199
+        Self::UNIX_EPOCH
+            .checked_add(std::time::Duration::new(seconds, subsec_nanos))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
     }
 }
 
@@ -794,8 +803,21 @@ pub mod context {
             /// by trading a small amount of entropy for better counter synchronization. Note that the counter
             /// will still be reseeded on millisecond boundaries, even though some of its storage will be
             /// dedicated to the timestamp.
-            pub fn with_additional_precision(mut self) -> Self {
-                self.precision = Precision::new(12);
+            pub fn with_additional_precision(self) -> Self {
+                self.with_additional_precision_bits(12)
+            }
+
+            /// Use the leftmost `bits` bits of the counter for additional timestamp precision.
+            ///
+            /// This is a more general form of [`ContextV7::with_additional_precision`] for platforms
+            /// whose clocks don't have the resolution to make use of the full 12 bits. A platform with
+            /// microsecond precision can set 10 bits here, leaving the remaining 2 bits of the `rand_a`
+            /// field free for random data.
+            ///
+            /// `bits` is capped at 12, matching the size of the `rand_a` field in a version 7 UUID.
+            /// Passing 0 disables additional precision, the same as never calling this method.
+            pub fn with_additional_precision_bits(mut self, bits: usize) -> Self {
+                self.precision = Precision::new(cmp::min(bits, 12));
                 self
             }
         }
@@ -1156,6 +1178,49 @@ pub mod context {
             }
 
             #[test]
+            fn context_additional_precision_bits() {
+                let seconds = 1_496_854_535;
+                let subsec_nanos = 812_946_000;
+
+                // 10 bits leaves the low 2 bits of `rand_a` for random data, which suits
+                // platforms with microsecond precision
+                let context = ContextV7::new().with_additional_precision_bits(10);
+
+                let ts = Timestamp::from_unix(&context, seconds, subsec_nanos);
+
+                // The submillisecond precision occupies the leftmost 10 of the 42 counter bits
+                // NOTE: Future changes in rounding may change this value slightly
+                assert_eq!(968, ts.counter >> 32);
+
+                assert!(ts.counter < (u64::MAX >> 22) as u128);
+
+                // The full method is just the 12-bit form of this one
+                let full = Timestamp::from_unix(
+                    &ContextV7::new().with_additional_precision(),
+                    seconds,
+                    subsec_nanos,
+                );
+                let bits12 = Timestamp::from_unix(
+                    &ContextV7::new().with_additional_precision_bits(12),
+                    seconds,
+                    subsec_nanos,
+                );
+                assert_eq!(full.counter >> 30, bits12.counter >> 30);
+
+                // Values above 12 are capped at 12
+                let capped = Timestamp::from_unix(
+                    &ContextV7::new().with_additional_precision_bits(64),
+                    seconds,
+                    subsec_nanos,
+                );
+                assert_eq!(bits12.counter >> 30, capped.counter >> 30);
+
+                // Zero bits disables additional precision entirely
+                let none = ContextV7::new().with_additional_precision_bits(0);
+                assert_eq!(0, none.precision.bits);
+            }
+
+            #[test]
             fn context_overflow() {
                 let seconds = u64::MAX;
                 let subsec_nanos = u32::MAX;
@@ -1296,6 +1361,14 @@ mod tests {
 
             Timestamp::try_from(before_epoch)
                 .expect_err("Timestamp should not be created from before epoch");
+        }
+
+        #[test]
+        fn from_system_time_max() {
+            let ts = Timestamp::from_unix_time(u64::MAX, 999_999_999, 0, 0);
+
+            // Just make sure we don't panic
+            let _: SystemTime = ts.into();
         }
     }
 }
