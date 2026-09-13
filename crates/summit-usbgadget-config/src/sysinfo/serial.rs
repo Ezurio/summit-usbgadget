@@ -46,7 +46,7 @@ pub fn macs() -> Option<MacAddresses> {
         "AM62X" | "J722S" | "AM62LX" => read_cell_macs(AM62X_MAC_CELLS),
         "sama5d36" => read_cell_macs(SOM60_MAC_CELLS),
         "sama5d31" => read_uboot_mac("ethaddr"),
-        _ => return None,
+        _ => None,
     }
 }
 
@@ -94,7 +94,7 @@ fn read_trimmed(path: &str) -> Option<String> {
 }
 
 pub fn format_serial_mac(bytes: &[u8]) -> Option<String> {
-    (bytes.len() == 6).then(|| bytes.iter().rev().map(|byte| format!("{byte:02x}")).collect())
+    (bytes.len() == 6).then(|| bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Resolves a USB descriptor serial from the configured source.
