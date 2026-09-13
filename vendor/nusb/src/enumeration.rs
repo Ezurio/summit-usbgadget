@@ -1,8 +1,15 @@
-#[cfg(target_os = "windows")]
+#[cfg(any(docsrs, target_os = "windows"))]
 use std::ffi::{OsStr, OsString};
+use std::fmt::Debug;
 
-#[cfg(any(target_os = "linux"))]
+#[cfg(target_os = "linux")]
 use crate::platform::SysfsPath;
+
+#[cfg(target_os = "windows")]
+use crate::platform::DevInst;
+
+#[cfg(all(docsrs, not(target_os = "windows")))]
+struct DevInst();
 
 use crate::{Device, Error, MaybeFuture};
 
@@ -41,7 +48,7 @@ pub struct DeviceInfo {
     pub(crate) port_number: u32,
 
     #[cfg(target_os = "windows")]
-    pub(crate) devinst: crate::platform::DevInst,
+    pub(crate) devinst: DevInst,
 
     #[cfg(target_os = "windows")]
     pub(crate) driver: Option<String>,
@@ -52,14 +59,14 @@ pub struct DeviceInfo {
     #[cfg(target_os = "macos")]
     pub(crate) location_id: u32,
 
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     pub(crate) bus_id: String,
 
     #[cfg(any(
         target_os = "linux",
         target_os = "macos",
         target_os = "windows",
-        target_os = "android"
+        target_os = "android",
     ))]
     pub(crate) device_address: u8,
 
@@ -69,7 +76,12 @@ pub struct DeviceInfo {
     pub(crate) vendor_id: u16,
     pub(crate) product_id: u16,
 
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_arch = "wasm32"
+    ))]
     pub(crate) device_version: u16,
 
     pub(crate) usb_version: u16,
@@ -77,6 +89,12 @@ pub struct DeviceInfo {
     pub(crate) subclass: u8,
     pub(crate) protocol: u8,
 
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android",
+    ))]
     pub(crate) speed: Option<Speed>,
 
     pub(crate) manufacturer_string: Option<String>,
@@ -84,6 +102,9 @@ pub struct DeviceInfo {
     pub(crate) serial_number: Option<String>,
 
     pub(crate) interfaces: Vec<InterfaceInfo>,
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) device: crate::platform::UsbDevice,
 }
 
 impl DeviceInfo {
@@ -106,10 +127,15 @@ impl DeviceInfo {
         {
             DeviceId(self.registry_id)
         }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            DeviceId(crate::platform::DeviceId::from_device(&self.device))
+        }
     }
 
     /// *(Linux-only)* Sysfs path for the device.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(docsrs, target_os = "linux"))]
     pub fn sysfs_path(&self) -> &std::path::Path {
         &self.path.0
     }
@@ -117,31 +143,31 @@ impl DeviceInfo {
     /// *(Linux-only)* Bus number.
     ///
     /// On Linux, the `bus_id` is an integer and this provides the value as `u8`.
-    #[cfg(any(target_os = "linux"))]
+    #[cfg(any(docsrs, target_os = "linux"))]
     pub fn busnum(&self) -> u8 {
         self.busnum
     }
 
     /// *(Windows-only)* Instance ID path of this device
-    #[cfg(target_os = "windows")]
+    #[cfg(any(docsrs, target_os = "windows"))]
     pub fn instance_id(&self) -> &OsStr {
         &self.instance_id
     }
 
     /// *(Windows-only)* Location paths property
-    #[cfg(target_os = "windows")]
+    #[cfg(any(docsrs, target_os = "windows"))]
     pub fn location_paths(&self) -> &[OsString] {
         &self.location_paths
     }
 
     /// *(Windows-only)* Instance ID path of the parent hub
-    #[cfg(target_os = "windows")]
+    #[cfg(any(docsrs, target_os = "windows"))]
     pub fn parent_instance_id(&self) -> &OsStr {
         &self.parent_instance_id
     }
 
     /// *(Windows-only)* Port number
-    #[cfg(target_os = "windows")]
+    #[cfg(any(docsrs, target_os = "windows"))]
     pub fn port_number(&self) -> u32 {
         self.port_number
     }
@@ -153,37 +179,52 @@ impl DeviceInfo {
     ///
     /// Since USB SuperSpeed is a separate topology from USB 2.0 speeds, a
     /// physical port may be identified differently depending on speed.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        docsrs,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub fn port_chain(&self) -> &[u8] {
         &self.port_chain
     }
 
     /// *(Windows-only)* Driver associated with the device as a whole
-    #[cfg(target_os = "windows")]
+    #[cfg(any(docsrs, target_os = "windows"))]
     pub fn driver(&self) -> Option<&str> {
         self.driver.as_deref()
     }
 
     /// *(macOS-only)* IOKit Location ID
-    #[cfg(target_os = "macos")]
+    #[cfg(any(docsrs, target_os = "macos"))]
     pub fn location_id(&self) -> u32 {
         self.location_id
     }
 
     /// *(macOS-only)* IOKit [Registry Entry ID](https://developer.apple.com/documentation/iokit/1514719-ioregistryentrygetregistryentryi?language=objc)
-    #[cfg(target_os = "macos")]
+    #[cfg(any(docsrs, target_os = "macos"))]
     pub fn registry_entry_id(&self) -> u64 {
         self.registry_id
     }
 
     /// Identifier for the bus / host controller where the device is connected.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        docsrs,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub fn bus_id(&self) -> &str {
         &self.bus_id
     }
 
     /// Number identifying the device within the bus.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        docsrs,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub fn device_address(&self) -> u8 {
         self.device_address
     }
@@ -202,7 +243,13 @@ impl DeviceInfo {
 
     /// The device version, normally encoded as BCD, from the `bcdDevice` device descriptor field.
     #[doc(alias = "bcdDevice")]
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        docsrs,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_arch = "wasm32"
+    ))]
     pub fn device_version(&self) -> u16 {
         self.device_version
     }
@@ -234,7 +281,12 @@ impl DeviceInfo {
     }
 
     /// Connection speed
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        docsrs,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub fn speed(&self) -> Option<Speed> {
         self.speed
     }
@@ -283,6 +335,23 @@ impl DeviceInfo {
         self.interfaces.iter()
     }
 
+    /// Check whether this device matches a [`DeviceSelector`].
+    pub fn matches(&self, s: &DeviceSelector) -> bool {
+        s.vendor_id.is_none_or(|id| self.vendor_id == id)
+            && s.product_id.is_none_or(|id| self.product_id == id)
+            && s.serial_number
+                .as_ref()
+                .is_none_or(|s| self.serial_number.as_deref() == Some(s))
+            && ((s.class.is_none_or(|c| self.class == c)
+                && s.subclass.is_none_or(|s| self.subclass == s)
+                && s.protocol.is_none_or(|p| self.protocol == p))
+                || self.interfaces().any(|i| {
+                    s.class.is_none_or(|c| i.class == c)
+                        && s.subclass.is_none_or(|s| i.subclass == s)
+                        && s.protocol.is_none_or(|p| i.protocol == p)
+                }))
+    }
+
     /// Open the device
     pub fn open(&self) -> impl MaybeFuture<Output = Result<Device, Error>> {
         Device::open(self)
@@ -297,12 +366,18 @@ impl std::fmt::Debug for DeviceInfo {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         s.field("bus_id", &self.bus_id)
             .field("device_address", &self.device_address)
-            .field("port_chain", &format_args!("{:?}", self.port_chain));
+            .field("port_chain", &format_args!("{:?}", self.port_chain))
+            .field("speed", &self.speed);
 
         s.field("vendor_id", &format_args!("0x{:04X}", self.vendor_id))
             .field("product_id", &format_args!("0x{:04X}", self.product_id));
 
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_arch = "wasm32"
+        ))]
         s.field(
             "device_version",
             &format_args!("0x{:04X}", self.device_version),
@@ -312,7 +387,6 @@ impl std::fmt::Debug for DeviceInfo {
             .field("class", &format_args!("0x{:02X}", self.class))
             .field("subclass", &format_args!("0x{:02X}", self.subclass))
             .field("protocol", &format_args!("0x{:02X}", self.protocol))
-            .field("speed", &self.speed)
             .field("manufacturer_string", &self.manufacturer_string)
             .field("product_string", &self.product_string)
             .field("serial_number", &self.serial_number);
@@ -475,7 +549,12 @@ impl UsbControllerType {
 /// * Linux: `path`, `busnum`, `root_hub`
 /// * Windows: `instance_id`, `parent_instance_id`, `location_paths`, `devinst`, `root_hub_description`
 /// * macOS: `registry_id`, `location_id`, `name`, `provider_class_name`, `class_name`
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    docsrs,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub struct BusInfo {
     #[cfg(any(target_os = "linux"))]
     pub(crate) path: SysfsPath,
@@ -494,7 +573,7 @@ pub struct BusInfo {
     pub(crate) location_paths: Vec<OsString>,
 
     #[cfg(target_os = "windows")]
-    pub(crate) devinst: crate::platform::DevInst,
+    pub(crate) devinst: DevInst,
 
     #[cfg(target_os = "windows")]
     pub(crate) root_hub_description: String,
@@ -526,10 +605,15 @@ pub struct BusInfo {
     pub(crate) controller_type: Option<UsbControllerType>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    docsrs,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows"
+))]
 impl BusInfo {
     /// *(Linux-only)* Sysfs path for the bus.
-    #[cfg(any(target_os = "linux"))]
+    #[cfg(any(docsrs, target_os = "linux"))]
     pub fn sysfs_path(&self) -> &std::path::Path {
         &self.path.0
     }
@@ -537,67 +621,67 @@ impl BusInfo {
     /// *(Linux-only)* Bus number.
     ///
     /// On Linux, the `bus_id` is an integer and this provides the value as `u8`.
-    #[cfg(any(target_os = "linux"))]
+    #[cfg(any(docsrs, target_os = "linux"))]
     pub fn busnum(&self) -> u8 {
         self.busnum
     }
 
     /// *(Linux-only)* The root hub [`DeviceInfo`] representing the bus.
-    #[cfg(any(target_os = "linux"))]
+    #[cfg(any(docsrs, target_os = "linux"))]
     pub fn root_hub(&self) -> &DeviceInfo {
         &self.root_hub
     }
 
     /// *(Windows-only)* Instance ID path of this device
-    #[cfg(target_os = "windows")]
+    #[cfg(any(docsrs, target_os = "windows"))]
     pub fn instance_id(&self) -> &OsStr {
         &self.instance_id
     }
 
     /// *(Windows-only)* Instance ID path of the parent device
-    #[cfg(target_os = "windows")]
+    #[cfg(any(docsrs, target_os = "windows"))]
     pub fn parent_instance_id(&self) -> &OsStr {
         &self.parent_instance_id
     }
 
     /// *(Windows-only)* Location paths property
-    #[cfg(target_os = "windows")]
+    #[cfg(any(docsrs, target_os = "windows"))]
     pub fn location_paths(&self) -> &[OsString] {
         &self.location_paths
     }
 
     /// *(Windows-only)* Device Instance ID
-    #[cfg(target_os = "windows")]
-    pub fn devinst(&self) -> crate::platform::DevInst {
+    #[cfg(any(docsrs, target_os = "windows"))]
+    pub fn devinst(&self) -> DevInst {
         self.devinst
     }
 
     /// *(macOS-only)* IOKit Location ID
-    #[cfg(target_os = "macos")]
+    #[cfg(any(docsrs, target_os = "macos"))]
     pub fn location_id(&self) -> u32 {
         self.location_id
     }
 
     /// *(macOS-only)* IOKit [Registry Entry ID](https://developer.apple.com/documentation/iokit/1514719-ioregistryentrygetregistryentryi?language=objc)
-    #[cfg(target_os = "macos")]
+    #[cfg(any(docsrs, target_os = "macos"))]
     pub fn registry_entry_id(&self) -> u64 {
         self.registry_id
     }
 
     /// *(macOS-only)* IOKit provider class name
-    #[cfg(target_os = "macos")]
+    #[cfg(any(docsrs, target_os = "macos"))]
     pub fn provider_class_name(&self) -> &str {
         &self.provider_class_name
     }
 
     /// *(macOS-only)* IOKit class name
-    #[cfg(target_os = "macos")]
+    #[cfg(any(docsrs, target_os = "macos"))]
     pub fn class_name(&self) -> &str {
         &self.class_name
     }
 
     /// *(macOS-only)* Name of the bus
-    #[cfg(target_os = "macos")]
+    #[cfg(any(docsrs, target_os = "macos"))]
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
@@ -641,10 +725,20 @@ impl BusInfo {
         {
             self.name.as_deref()
         }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    docsrs,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows"
+))]
 impl std::fmt::Debug for BusInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("BusInfo");
@@ -678,6 +772,155 @@ impl std::fmt::Debug for BusInfo {
             .field("controller_type", &self.controller_type)
             .field("driver", &self.driver);
 
+        s.finish()
+    }
+}
+
+/// A filter for matching devices in [`request_device`][crate::request_device].
+///
+/// ## Example
+///
+/// ```no_run
+/// use nusb::{DeviceSelector, MaybeFuture};
+///
+/// let devices = nusb::request_device(&[
+///     DeviceSelector::all().with_vid_pid(0x1234, 0x5678),
+///     DeviceSelector::all().with_vid_pid(0x1111, 0x2222),
+/// ]).wait().unwrap();
+/// ```
+#[derive(Default, Clone)]
+pub struct DeviceSelector {
+    pub(crate) vendor_id: Option<u16>,
+    pub(crate) product_id: Option<u16>,
+    pub(crate) class: Option<u8>,
+    pub(crate) subclass: Option<u8>,
+    pub(crate) protocol: Option<u8>,
+    pub(crate) serial_number: Option<String>,
+}
+
+impl DeviceSelector {
+    /// A selector that matches all devices.
+    pub const fn all() -> DeviceSelector {
+        DeviceSelector {
+            vendor_id: None,
+            product_id: None,
+            class: None,
+            subclass: None,
+            protocol: None,
+            serial_number: None,
+        }
+    }
+
+    /// Narrow the selector to only match devices with the given vendor ID.
+    pub const fn with_vid(mut self, vendor_id: u16) -> DeviceSelector {
+        self.vendor_id = Some(vendor_id);
+        self
+    }
+
+    /// Narrow the selector to only match devices with the given vendor ID and product ID.
+    pub const fn with_vid_pid(mut self, vendor_id: u16, product_id: u16) -> DeviceSelector {
+        self.vendor_id = Some(vendor_id);
+        self.product_id = Some(product_id);
+        self
+    }
+
+    /// Narrow the selector to only match devices with the given class code.
+    pub const fn with_class(mut self, class_code: u8) -> DeviceSelector {
+        self.class = Some(class_code);
+        self
+    }
+
+    /// Narrow the selector to only match devices with the given class and subclass.
+    pub const fn with_class_subclass(
+        mut self,
+        class_code: u8,
+        subclass_code: u8,
+    ) -> DeviceSelector {
+        self.class = Some(class_code);
+        self.subclass = Some(subclass_code);
+        self
+    }
+
+    /// Narrow the selector to only match devices with the given class, subclass, and protocol.
+    pub const fn with_class_subclass_protocol(
+        mut self,
+        class_code: u8,
+        subclass_code: u8,
+        protocol_code: u8,
+    ) -> DeviceSelector {
+        self.class = Some(class_code);
+        self.subclass = Some(subclass_code);
+        self.protocol = Some(protocol_code);
+        self
+    }
+
+    /// Narrow the selector to only match devices with the given serial number.
+    pub fn with_serial_number(mut self, serial_number: String) -> DeviceSelector {
+        self.serial_number = Some(serial_number);
+        self
+    }
+
+    /// Vendor ID, or `None` if not filtered by vendor ID.
+    pub fn vendor_id(&self) -> Option<u16> {
+        self.vendor_id
+    }
+
+    /// Product ID, or `None` if not filtered by product ID.
+    pub fn product_id(&self) -> Option<u16> {
+        self.product_id
+    }
+
+    /// Class code, or `None` if not filtered by class.
+    pub fn class(&self) -> Option<u8> {
+        self.class
+    }
+
+    /// Subclass code, or `None` if not filtered by subclass.
+    pub fn subclass(&self) -> Option<u8> {
+        self.subclass
+    }
+
+    /// Protocol code, or `None` if not filtered by protocol.
+    pub fn protocol(&self) -> Option<u8> {
+        self.protocol
+    }
+
+    /// Serial number, or `None` if not filtered by serial number.
+    pub fn serial_number(&self) -> Option<&str> {
+        self.serial_number.as_deref()
+    }
+}
+
+impl Debug for DeviceSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let DeviceSelector {
+            vendor_id,
+            product_id,
+            class,
+            subclass,
+            protocol,
+            ref serial_number,
+        } = *self;
+
+        let mut s = f.debug_struct("DeviceSelector");
+        if let Some(vendor_id) = vendor_id {
+            s.field("vendor_id", &format_args!("0x{vendor_id:04X}"));
+        }
+        if let Some(product_id) = product_id {
+            s.field("product_id", &format_args!("0x{product_id:04X}"));
+        }
+        if let Some(class) = class {
+            s.field("class", &format_args!("0x{class:02X}"));
+        }
+        if let Some(subclass) = subclass {
+            s.field("subclass", &format_args!("0x{subclass:02X}"));
+        }
+        if let Some(protocol) = protocol {
+            s.field("protocol", &format_args!("0x{protocol:02X}"));
+        }
+        if let Some(ref serial_number) = serial_number {
+            s.field("serial_number", serial_number);
+        }
         s.finish()
     }
 }

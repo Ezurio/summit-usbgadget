@@ -1,3 +1,5 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, doc(auto_cfg(hide(docsrs))))]
 #![warn(missing_docs)]
 //! A new library for cross-platform low-level access to USB devices.
 //!
@@ -173,6 +175,31 @@
 //! }
 //! ```
 //!
+//! ### WebUSB
+//!
+//! `nusb` can be used from WebAssembly in browsers with [WebUSB] support.
+//!
+//! Only the async APIs are available since the browser event loop does not
+//! allow blocking.
+//!
+//! `web-sys` considers its WebUSB bindings unstable and [requires the root
+//! crate to opt in][web_sys_unstable]. Put the following in your
+//! `.cargo/config.toml`:
+//!
+//! ```toml
+//! [target.wasm32-unknown-unknown]
+//! rustflags = ["--cfg=web_sys_unstable_apis"]
+//! ```
+//!
+//! WebUSB requires a user permission request to access a device. Use
+//! [`request_device`] to prompt the user and get the selected device. Once
+//! permissions are granted, the device will appear in [`list_devices`] as well.
+//! Alternatively, use `Device::from_js` to wrap a `web_sys::UsbDevice` you
+//! obtain yourself.
+//!
+//! [WebUSB]: https://wicg.github.io/webusb/
+//! [web_sys_unstable]: https://wasm-bindgen.github.io/wasm-bindgen/web-sys/unstable-apis.html
+//!
 //! ## Async support
 //!
 //! Many methods in `nusb` return a [`MaybeFuture`] type, which can either be
@@ -201,14 +228,22 @@ pub mod descriptors;
 mod enumeration;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use enumeration::BusInfo;
-pub use enumeration::{DeviceId, DeviceInfo, InterfaceInfo, Speed, UsbControllerType};
+pub use enumeration::{
+    DeviceId, DeviceInfo, DeviceSelector, InterfaceInfo, Speed, UsbControllerType,
+};
 
 mod device;
 pub use device::{Device, Endpoint, Interface};
 
 pub mod transfer;
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    docsrs,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+))]
 pub mod hotplug;
 
 mod maybe_future;
@@ -231,10 +266,63 @@ pub use error::{ActiveConfigurationError, Error, ErrorKind, GetDescriptorError};
 ///     .find(|dev| dev.vendor_id() == 0xAAAA && dev.product_id() == 0xBBBB)
 ///     .expect("device not connected");
 /// ```
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    docsrs,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+))]
 pub fn list_devices() -> impl MaybeFuture<Output = Result<impl Iterator<Item = DeviceInfo>, Error>>
 {
     platform::list_devices()
+}
+
+/// Get a device that matches any of the provided [`DeviceSelector`]s and request user permission if necessary.
+///
+/// ### Example
+///
+/// ```no_run
+/// use nusb::{self, DeviceSelector};
+/// # async {
+/// let device = nusb::request_device(&[DeviceSelector::all()])
+///     .await
+///     .unwrap()
+///     .expect("no device found or permission denied");
+/// # };
+/// ```
+///
+/// Platform-specific notes:
+///
+/// * **WebUSB**: This prompts the user for permission to access matching
+/// devices. If approved, the device selected by the user will be
+/// returned. If cancelled, returns `Ok(None)`. The browser requires
+/// [Transient User Activation] for this call: it must be called in response to
+/// a user action, not unprompted on page load.
+///
+/// * On other platforms, this calls [`list_devices`] and finds an arbitrary
+/// device that matches the selector, returning `Ok(None)` if no matching device is found.
+///
+/// [Transient User Activation]: https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/User_activation
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+))]
+pub fn request_device(
+    selectors: &[DeviceSelector],
+) -> impl MaybeFuture<Output = Result<Option<DeviceInfo>, Error>> + use<'_> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        list_devices()
+            .map_ok(|mut devices| devices.find(|dev| selectors.iter().any(|s| dev.matches(s))))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        platform::request_device(selectors)
+    }
 }
 
 /// Get an iterator listing the system USB buses.
@@ -256,7 +344,12 @@ pub fn list_devices() -> impl MaybeFuture<Output = Result<impl Iterator<Item = D
 ///     })
 ///     .collect();
 /// ```
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    docsrs,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub fn list_buses() -> impl MaybeFuture<Output = Result<impl Iterator<Item = BusInfo>, Error>> {
     platform::list_buses()
 }
@@ -296,7 +389,13 @@ pub fn list_buses() -> impl MaybeFuture<Output = Result<impl Iterator<Item = Bus
 ///     when the `Connected` event is emitted. If you are immediately opening the device
 ///     and claiming an interface when receiving a `Connected` event,
 ///     you should retry after a short delay if opening or claiming fails.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    docsrs,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+))]
 pub fn watch_devices() -> Result<hotplug::HotplugWatch, Error> {
     Ok(hotplug::HotplugWatch(platform::HotplugWatch::new()?))
 }
