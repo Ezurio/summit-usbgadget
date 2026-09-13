@@ -11,6 +11,8 @@ use summit_usbgadget_usb::registry::{FunctionBuildContext, GadgetService, Regist
 use summit_usbgadget_swupdate::sysinfo::system_info_json;
 use summit_usbgadget_swupdate::SwupdateConfig;
 
+const DEFAULT_POLL_TIMEOUT_MS: u32 = 10;
+
 mod handler;
 
 pub mod config;
@@ -43,7 +45,7 @@ impl Default for DfuFnConfig {
 			swupdate: SwupdateConfig::default(),
 			upload: None,
 			transfer_size: 4096,
-			poll_timeout_ms: 10,
+			poll_timeout_ms: DEFAULT_POLL_TIMEOUT_MS,
 		}
 	}
 }

@@ -127,7 +127,7 @@ pub fn parse_command(data: &[u8]) -> Option<(ParsedCommand, usize)> {
                     size_start + DOWNLOAD_SIZE_WIDTH,
                 )
             }
-            b"WOpen" if args.is_empty() => (ParsedCommand::WOpen, 0),
+            b"WOpen" => (ParsedCommand::WOpen, token_len()),
             b"getvar" => {
                 let len = token_len();
                 match std::str::from_utf8(&args[..len])

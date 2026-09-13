@@ -87,13 +87,27 @@ impl EventHandler for Dfu {
         self.reset_on_idle_timeout().await;
     }
 
+    /// End the SWUpdate input stream when the host disconnects before sending
+    /// the normal zero-length DFU_DNLOAD manifestation request.
+    async fn on_transport_closed(&mut self, _udc_name: &str) {
+        self.reset_on_idle_timeout().await;
+    }
+
     /// Dispatches a single FunctionFS event to the DFU state machine.
     async fn handle_event(&mut self, _udc_name: &str, event: Event<'_>) -> std::io::Result<()> {
         match event {
             Event::SetupHostToDevice(req) => {
                 let ctrl = req.ctrl_req().clone();
+                log::debug!(
+                    "DFU OUT setup: request={:#04x} value={} index={} length={}",
+                    ctrl.request,
+                    ctrl.value,
+                    ctrl.index,
+                    ctrl.length,
+                );
                 if !super::is_dfu_request(&ctrl) {
                     log::debug!("ignoring non-DFU OUT request {:#04x}", ctrl.request);
+                    let _ = req.recv_all_async().await;
                     return Ok(());
                 }
                 // DFU_DNLOAD data blocks are read straight into a recycled
@@ -103,37 +117,39 @@ impl EventHandler for Dfu {
                     return match self.receive_dnload_block(req).await {
                         Ok(()) => Ok(()),
                         Err(err) if is_closed_transport_error(&err) => {
-                            self.abort_transfer().await;
+                            self.reset_on_idle_timeout().await;
                             Ok(())
                         }
                         Err(err) => Err(err),
                     };
                 }
                 // Remaining DFU OUT requests carry no download payload; drain
-                // any data stage to complete the control transfer, then dispatch.
-                if req.is_empty() {
-                    let mut probe = [0u8; 1];
-                    match req.recv_async(&mut probe).await {
-                        Ok(_) => {}
-                        Err(err) if is_closed_transport_error(&err) => {}
-                        Err(err) => return Err(err),
+                // the request using its declared length to complete the
+                // control transfer, then dispatch. In particular, do not read
+                // a probe byte for a zero-length request: real FunctionFS
+                // blocks because that control request has no data stage.
+                match req.recv_all_async().await {
+                    Ok(_) => {}
+                    Err(err) if is_closed_transport_error(&err) => {
+                        self.reset_on_idle_timeout().await;
+                        return Ok(());
                     }
-                } else {
-                    match req.recv_all_async().await {
-                        Ok(_) => {}
-                        Err(err) if is_closed_transport_error(&err) => {
-                            self.abort_transfer().await;
-                            return Ok(());
-                        }
-                        Err(err) => return Err(err),
-                    }
+                    Err(err) => return Err(err),
                 }
                 self.handle_out(&ctrl).await
             }
             Event::SetupDeviceToHost(req) => {
                 let ctrl = req.ctrl_req().clone();
+                log::debug!(
+                    "DFU IN setup: request={:#04x} value={} index={} length={}",
+                    ctrl.request,
+                    ctrl.value,
+                    ctrl.index,
+                    ctrl.length,
+                );
                 if !super::is_dfu_request(&ctrl) {
                     log::debug!("ignoring non-DFU IN request {:#04x}", ctrl.request);
+                    let _ = req.send_async(&[]).await;
                     return Ok(());
                 }
                 let response = self.handle_in(&ctrl).await?;
@@ -151,6 +167,12 @@ impl EventHandler for Dfu {
             }
             Event::Disable => {
                 log::info!("DFU function disabled");
+                self.reset_on_idle_timeout().await;
+                Ok(())
+            }
+            Event::Unbind => {
+                log::info!("DFU function unbound");
+                self.reset_on_idle_timeout().await;
                 Ok(())
             }
             other => {

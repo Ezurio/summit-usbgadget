@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Ezurio-Clause
 //
 
+use bytes::BytesMut;
 use crc32fast::Hasher;
 use usb_gadget::function::custom::CtrlReq;
 
@@ -79,14 +80,41 @@ async fn get_status_reports_dnbusy_when_buffer_limit_is_reached() {
 }
 
 #[tokio::test]
-async fn get_status_reports_configured_poll_timeout_while_busy() {
+async fn get_status_reports_busy_poll_timeout_when_queue_is_full() {
     let mut dfu = Dfu::new(test_config());
     dfu.state = State::DnBusy;
+    dfu.status = Status::Ok;
+    dfu.pending = Some(BytesMut::from(&b"pending"[..]));
+
+    let status = dfu.get_status();
+
+    assert_eq!(status.as_slice()[1], 100);
+    assert_eq!(status.as_slice()[2], 0);
+    assert_eq!(status.as_slice()[3], 0);
+}
+
+#[tokio::test]
+async fn get_status_reports_zero_poll_timeout_when_download_is_ready() {
+    let mut dfu = Dfu::new(test_config());
+    dfu.state = State::DnloadIdle;
     dfu.status = Status::Ok;
 
     let status = dfu.get_status();
 
-    assert_eq!(status.as_slice()[1], 10);
+    assert_eq!(status.as_slice()[1], 0);
+    assert_eq!(status.as_slice()[2], 0);
+    assert_eq!(status.as_slice()[3], 0);
+}
+
+#[tokio::test]
+async fn get_status_reports_configured_poll_timeout_during_manifestation() {
+    let mut dfu = Dfu::new(test_config());
+    dfu.state = State::Manifest;
+    dfu.status = Status::Ok;
+
+    let status = dfu.get_status();
+
+    assert_eq!(status.as_slice()[1], 100);
     assert_eq!(status.as_slice()[2], 0);
     assert_eq!(status.as_slice()[3], 0);
 }
@@ -110,4 +138,14 @@ fn initial_state_is_dfu_idle() {
 
     assert_eq!(dfu.state, State::DfuIdle);
     assert_eq!(dfu.status, Status::Ok);
+    assert!(dfu.dfu_idle_timeout().is_none());
 }
+
+#[test]
+fn transfer_idle_timeout_measures_inactivity_gap() {
+    let mut dfu = Dfu::new(test_config());
+    dfu.state = State::DnloadSync;
+
+    assert_eq!(dfu.dfu_idle_timeout(), Some(std::time::Duration::from_secs(5)));
+}
+

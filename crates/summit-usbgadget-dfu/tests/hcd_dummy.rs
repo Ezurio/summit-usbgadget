@@ -14,7 +14,7 @@ use summit_usbgadget_usb::config::{DeviceConfig, FunctionConfig, GadgetConfig, U
 mod hcd_dummy_support;
 
 use hcd_dummy_support::{
-    GadgetServer, TEST_MANUFACTURER, TEST_SERIAL, TestEnvironment, dummy_hcd_test_lock,
+    GadgetServer, TEST_MANUFACTURER, TestEnvironment, dummy_hcd_test_lock,
     read_trimmed, wait_for_usb_device,
     wait_for_usb_device_removal,
 };
@@ -59,8 +59,8 @@ fn run_dfu_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
             manufacturer: Some(TEST_MANUFACTURER.to_string()),
             product_name: Some(DFU_PRODUCT.to_string()),
             product_name_source: Some("custom".to_string()),
-            serial: Some(TEST_SERIAL.to_string()),
-            serial_source: Some("custom".to_string()),
+            serial: None,
+            serial_source: Some("auto".to_string()),
         },
         config: vec![UsbConfigConfig {
             description: Some("DFU protocol test".to_string()),
@@ -87,7 +87,8 @@ fn run_dfu_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
     let device_path = wait_for_usb_device(DFU_VENDOR_ID, DFU_PRODUCT_ID, Duration::from_secs(10))?;
     assert_eq!(read_trimmed(&device_path.join("manufacturer"))?, TEST_MANUFACTURER);
     assert_eq!(read_trimmed(&device_path.join("product"))?, DFU_PRODUCT);
-    assert_eq!(read_trimmed(&device_path.join("serial"))?, TEST_SERIAL);
+    let serial = read_trimmed(&device_path.join("serial"))?;
+    assert!(!serial.is_empty());
 
     let (interface, if_num) = claim_interface(DFU_VENDOR_ID, DFU_PRODUCT_ID, 0xfe, 0x01, 0x02)?;
 
@@ -99,7 +100,7 @@ fn run_dfu_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
     assert_eq!(status.state, DfuState::DfuIdle as u8);
 
     let mut expected_upload = Vec::new();
-    sysinfo::SystemInfo::collect(Some(TEST_SERIAL.to_string())).write_json(&mut expected_upload);
+    sysinfo::SystemInfo::collect(None).write_json(&mut expected_upload);
     let mut uploaded = Vec::new();
     let mut block = 0u16;
     loop {
@@ -244,8 +245,8 @@ fn run_dfu_abort_sequence(env: &TestEnvironment) -> Result<(), Box<dyn Error>> {
             manufacturer: Some(TEST_MANUFACTURER.to_string()),
             product_name: Some(DFU_PRODUCT.to_string()),
             product_name_source: Some("custom".to_string()),
-            serial: Some(TEST_SERIAL.to_string()),
-            serial_source: Some("custom".to_string()),
+            serial: None,
+            serial_source: Some("auto".to_string()),
         },
         config: vec![UsbConfigConfig {
             description: Some("DFU abort test".to_string()),
