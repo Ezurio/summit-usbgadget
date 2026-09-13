@@ -18,6 +18,7 @@ use summit_usbgadget_usb::config::GadgetConfig;
 use summit_usbgadget_usb::gadget;
 
 pub(crate) const TEST_MANUFACTURER: &str = "Ezurio";
+#[allow(dead_code)]
 pub(crate) const TEST_SERIAL: &str = "dummy-hcd-protocols";
 
 pub(crate) fn dummy_hcd_test_lock() -> MutexGuard<'static, ()> {

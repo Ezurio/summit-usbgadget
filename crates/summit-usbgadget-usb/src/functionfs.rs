@@ -9,22 +9,23 @@
 //! what to do with the event.
 
 use std::io;
-use std::os::fd::RawFd;
 use std::time::Duration;
 
-use tokio::io::{unix::AsyncFd, Interest};
 use tokio::time::timeout;
 use usb_gadget::function::custom::{Custom, Event};
 
-/// Returns `true` when an error means the FunctionFS transport was permanently
-/// torn down (endpoint disabled, gadget unbound), so the caller should stop
-/// rather than retry.
+/// Returns `true` when an error means the FunctionFS instance itself is gone
+/// (gadget unbound / ep0 closed for good), so the caller should stop rather
+/// than retry.
 ///
+/// Cable unplug is **not** this: the host sends `Suspend`/`Disable` while ep0
+/// stays open so the next `Enable` can re-arm. `ESHUTDOWN` on a bulk endpoint
+/// is the same disable, not teardown — do not treat it as fatal here.
 /// Deliberately does **not** include `EIDRM`: see [`is_setup_superseded_error`].
 fn is_torn_down_transport_error(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::NotConnected
         || err.kind() == io::ErrorKind::BrokenPipe
-        || err.raw_os_error() == Some(rustix::io::Errno::SHUTDOWN.raw_os_error())
+        || err.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error())
 }
 
 /// Returns `true` when an error means the host superseded the control request
@@ -55,8 +56,8 @@ fn is_setup_superseded_error(err: &io::Error) -> bool {
 /// a sign of a corrupt transfer, so it must not be logged as a hard error --
 /// but it also does not by itself mean ep0 itself is gone, so (unlike
 /// [`is_torn_down_transport_error`]) it must never stop the outer `serve()`
-/// loop: the real teardown (`ENODEV`/`ESHUTDOWN`) follows a moment later once
-/// the unbind actually completes, and that is what stops the loop.
+/// loop: the real teardown (`ENODEV`) follows a moment later once the unbind
+/// actually completes, and that is what stops the loop.
 fn is_signal_interrupted_error(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::Interrupted
 }
@@ -65,26 +66,31 @@ fn is_signal_interrupted_error(err: &io::Error) -> bool {
 /// cancelled, interrupted, or the FunctionFS transport was torn down, so the
 /// caller should give up on this request/transfer without treating it as a
 /// hard failure.
+///
+/// Includes bulk `ESHUTDOWN` (cable unplug / function Disable). That is not
+/// [`is_torn_down_transport_error`]: the ep0 loop must keep running so the
+/// next `Enable` can re-arm.
 pub fn is_closed_transport_error(err: &io::Error) -> bool {
-    is_torn_down_transport_error(err) || is_setup_superseded_error(err) || is_signal_interrupted_error(err)
+    is_torn_down_transport_error(err)
+        || is_setup_superseded_error(err)
+        || is_signal_interrupted_error(err)
+        || err.raw_os_error() == Some(rustix::io::Errno::SHUTDOWN.raw_os_error())
 }
 
 /// Control-event source for one bound custom function.
 ///
-/// Holds the readiness registration for the gadget's endpoint-zero fd alongside
-/// its [`Custom`], and yields events with [`Ep0Events::next`]: it parks on
-/// readiness and only then reads, so it never blocks the runtime. (It cannot be
-/// a `Stream` because each [`Event`] borrows the `Custom`.)
+/// Yields events from the gadget's endpoint-zero fd through the patched
+/// `usb-gadget` async API. (It cannot be a `Stream` because each [`Event`]
+/// borrows the `Custom`.)
 pub struct Ep0Events<'c> {
-    ep0: AsyncFd<RawFd>,
     custom: &'c mut Custom,
 }
 
 impl<'c> Ep0Events<'c> {
-    /// Registers the gadget's endpoint zero for readiness polling.
+    /// Creates an asynchronous endpoint-zero event source.
     pub fn new(custom: &'c mut Custom) -> io::Result<Self> {
-        let ep0 = AsyncFd::with_interest(custom.fd()?, Interest::READABLE)?;
-        Ok(Self { ep0, custom })
+        let _ = custom.fd()?;
+        Ok(Self { custom })
     }
 
     /// Waits for the next endpoint-zero event, then reads it.
@@ -93,9 +99,7 @@ impl<'c> Ep0Events<'c> {
     /// read cannot block: this is the whole "wait on poll, then read" loop.
     #[allow(clippy::should_implement_trait)]
     pub async fn next(&mut self) -> io::Result<Event<'_>> {
-        let mut guard = self.ep0.readable().await?;
-        guard.clear_ready();
-        self.custom.event()
+        self.custom.event_async().await
     }
 }
 
@@ -106,6 +110,12 @@ impl<'c> Ep0Events<'c> {
 #[allow(async_fn_in_trait)]
 pub trait EventHandler {
     async fn handle_event(&mut self, udc_name: &str, event: Event<'_>) -> io::Result<()>;
+
+    /// Called when endpoint zero is torn down while the handler is still
+    /// alive, such as when the host disconnects or the service is interrupted.
+    /// Handlers can use this to finish any producer-side streams before their
+    /// runtime is dropped.
+    async fn on_transport_closed(&mut self, _udc_name: &str) {}
 
     /// Idle timeout applied to the *next* `events.next()` wait; `None` (the
     /// default) waits indefinitely. Re-evaluated every loop iteration, so a
@@ -158,6 +168,7 @@ where
             // the loop so the task ends deterministically instead of spinning.
             Err(err) if is_torn_down_transport_error(&err) => {
                 log::info!("[{udc_name}] {label} endpoint zero closed, stopping");
+                handler.on_transport_closed(&udc_name).await;
                 return;
             }
             // The setup we were about to fetch details for was superseded by a

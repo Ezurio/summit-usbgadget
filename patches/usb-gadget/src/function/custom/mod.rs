@@ -1174,6 +1174,14 @@ impl Custom {
         Ok(())
     }
 
+    /// Asynchronously wait for and read the next event.
+    #[cfg(feature = "tokio")]
+    pub async fn event_async(&mut self) -> Result<Event<'_>> {
+        self.clear_prev_event()?;
+        self.wait_event().await?;
+        self.read_event()
+    }
+
     /// Returns whether events are available for processing.
     pub fn has_event(&mut self) -> bool {
         self.wait_event_sync(Some(Duration::ZERO)).unwrap_or_default()

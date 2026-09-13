@@ -51,7 +51,7 @@ impl EventHandler for FastbootControl {
                 log::info!("[{udc_name}] fastboot-usb function enabled");
                 let _ = self.enabled.send(true);
             }
-            Event::Disable => {
+            Event::Disable | Event::Unbind => {
                 log::info!("[{udc_name}] fastboot-usb function disabled");
                 let _ = self.enabled.send(false);
             }
@@ -207,29 +207,24 @@ impl FastbootUsbState {
     /// touch a USB endpoint even by accident) that does nothing but wait for
     /// the control loop to report the function enabled. Only once it returns
     /// `true` does this hand off to [`serve_connected`], which owns all bulk
-    /// USB I/O for as long as the function stays enabled. When
-    /// `serve_connected` returns (disabled, or the control loop ended), this
-    /// drops straight back to `wait_for_enabled` — the bulk path is never
-    /// touched in between.
+    /// USB I/O for as long as the function stays enabled.
+    ///
+    /// When `serve_connected` returns, bulk `ESHUTDOWN` has often already
+    /// arrived while `enabled` is still `true`. [`wait_for_enabled`] waits for
+    /// the next Enable *notification*, not the current flag, so we do not
+    /// re-enter `serve_connected` (and touch the bulk path) until the host
+    /// actually enables again. The bulk path is never touched in between.
     ///
     /// [`serve_connected`]: FastbootUsbState::serve_connected
     pub(super) async fn data_loop(&mut self, udc_name: &str, mut enabled: watch::Receiver<bool>) {
+        let mut accept_current = true;
         loop {
-            if !wait_for_enabled(&mut enabled).await {
+            if !wait_for_enabled(&mut enabled, accept_current).await {
                 return; // control loop ended
             }
+            accept_current = false;
+            self.gadget_torn_down = false;
             self.serve_connected(udc_name, &mut enabled).await;
-            if self.gadget_torn_down {
-                // The endpoint is permanently gone (UDC unbind in progress),
-                // not merely disabled pending a reconnect: re-checking `enabled`
-                // would just observe a stale `true` left over from before
-                // shutdown and immediately re-enter `serve_connected`, which
-                // would submit yet another read into a driver that is actively
-                // disabling the endpoint -- see `gadget_torn_down`'s doc comment
-                // for why that hangs `RunningGadget::shutdown`. Stop this task
-                // outright instead.
-                return;
-            }
         }
     }
 
@@ -241,10 +236,9 @@ impl FastbootUsbState {
     /// already ran `reset()` (which quiesces the bulk path and best-effort
     /// replies FAIL) before returning; this function never loops back to
     /// re-arm the endpoint after a hard failure — the caller (`data_loop`)
-    /// simply drops back to `wait_for_enabled`, i.e. the same as a real
-    /// Disable, until the function is genuinely re-enabled. A mid-download
-    /// SWUpdate failure is *not* one of these hard failures: it keeps serving,
-    /// draining the remaining announced bytes — see `fail_download`.
+    /// parks on the next Enable notification. A mid-download SWUpdate failure
+    /// is *not* one of these hard failures: it keeps serving, draining the
+    /// remaining announced bytes — see `fail_download`.
     async fn serve_connected(&mut self, udc_name: &str, enabled: &mut watch::Receiver<bool>) {
         // First real touch of the bulk endpoint for this connection: only
         // reached once the control loop has reported the function enabled, so
@@ -276,10 +270,11 @@ impl FastbootUsbState {
             // otherwise the transfer arm would spin on an empty queue.
             self.submit_recv(udc_name);
             if self.gadget_torn_down {
-                // submit_recv just saw the UDC being unbound: return immediately
-                // rather than falling into the select, which would otherwise sit
-                // parked on `enabled.changed()` (harmless, but pointless) until
-                // the control loop separately notices the same teardown.
+                // Bulk closed while priming a read (Disable, not UDC unbind).
+                // Same as `on_recv`'s closed-transport branch: reset session
+                // state so an in-flight download does not survive into the
+                // next Enable on this same `FastbootUsbState`.
+                self.reset(udc_name, None).await;
                 return;
             }
             let ready = !self.rx.is_empty() || self.finish_pending;
@@ -367,16 +362,13 @@ impl FastbootUsbState {
         let buf = self.recv_buffer();
         match self.rx.try_recv(buf) {
             Ok(_) => {}
-            // Any closed-transport condition (`ENOTCONN`/`ESHUTDOWN`/`BrokenPipe`,
-            // or ci_hdrc's unbind-time `EINTR`) means the endpoint is gone, so
-            // submitting a *new* read here is never safe: see `gadget_torn_down`'s
-            // doc comment for why a fresh read submitted while the driver is
-            // disabling the endpoint can hang `RunningGadget::shutdown`
-            // indefinitely. Set the flag unconditionally rather than only for
-            // `EINTR` -- there's no scenario on a *bulk* endpoint where
-            // continuing to resubmit after any of these is useful.
+            // Bulk `ESHUTDOWN`/`ENOTCONN` is Disable, not FunctionFS teardown.
+            // Do not submit another read while the driver is disabling the
+            // endpoint (that can hang a later UDC unbind). The caller resets
+            // session state and leaves `serve_connected`; `data_loop` waits
+            // for Disable, then Enable, before touching bulk I/O again.
             Err(err) if is_closed_transport_error(&err) => {
-                log::debug!("[{udc_name}] fastboot-usb bulk endpoint closed, no longer submitting reads: {err}");
+                log::debug!("[{udc_name}] fastboot-usb bulk endpoint closed, waiting for disable: {err}");
                 self.gadget_torn_down = true;
             }
             Err(err) => log::debug!("[{udc_name}] fastboot-usb submit read error: {err}"),
@@ -413,16 +405,10 @@ impl FastbootUsbState {
                     true
                 }
             }
-            // Any closed-transport condition (`ENOTCONN`/`ESHUTDOWN`/`BrokenPipe`,
-            // ci_hdrc's unbind-time `EINTR`, or an ep0-style superseded-setup
-            // `EIDRM` even though that shouldn't occur on a bulk completion in
-            // practice) means this endpoint is gone for good: mark
-            // `gadget_torn_down` unconditionally (see its doc comment for why
-            // letting the loop submit further reads here can hang
-            // `RunningGadget::shutdown` indefinitely) and reset/stop
-            // regardless of `in_flight()` -- continuing to "keep serving" when
-            // idle would just let the next `submit_recv` resubmit a fresh read
-            // into a dead/dying endpoint.
+            // Bulk `ESHUTDOWN`/`ENOTCONN` on cable unplug is Disable, not
+            // FunctionFS teardown. Stop this connected phase (do not resubmit)
+            // and let `data_loop` wait for Enable. Do not drop the endpoint
+            // files — that is what prevented re-arm after unplug.
             Err(err) if is_closed_transport_error(&err) => {
                 if self.in_flight() {
                     log::warn!(
@@ -559,19 +545,26 @@ impl FastbootUsbState {
     }
 }
 
-/// Waits until the function is enabled by a host. Takes no `FastbootUsbState`
-/// (and so has no way to touch a USB endpoint even by accident) — it does
-/// nothing but watch the control loop's signal.
+/// Waits for Enable. Takes no `FastbootUsbState` (and so has no way to touch
+/// a USB endpoint even by accident).
 ///
-/// Returns `true` once enabled, or `false` if the control loop ended (gadget
-/// unbound) while still disabled.
-async fn wait_for_enabled(enabled: &mut watch::Receiver<bool>) -> bool {
+/// `accept_current` is true only for the first wait, so a host that enabled
+/// before this task started is not missed. After a connected phase, it is
+/// false: bulk `ESHUTDOWN` often leaves the flag `true`, and treating that as
+/// a new connection would re-enter `serve_connected` while the driver is still
+/// disabling the endpoints. Parks on `changed()` until a new Enable arrives.
+///
+/// Returns `false` if the control loop ended (gadget unbound).
+async fn wait_for_enabled(enabled: &mut watch::Receiver<bool>, accept_current: bool) -> bool {
+    if accept_current && *enabled.borrow_and_update() {
+        return true;
+    }
     loop {
-        if *enabled.borrow_and_update() {
-            return true;
-        }
         if enabled.changed().await.is_err() {
             return false;
+        }
+        if *enabled.borrow_and_update() {
+            return true;
         }
     }
 }

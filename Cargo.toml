@@ -48,6 +48,9 @@ summit-usbgadget-usb = { path = "crates/summit-usbgadget-usb" }
 summit-usbgadget-swupdate = { path = "crates/summit-usbgadget-swupdate" }
 swupdate-ipc = { path = "crates/swupdate-ipc", features = ["async"] }
 
+[patch.crates-io]
+usb-gadget = { path = "patches/usb-gadget" }
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 unused_results = "deny"

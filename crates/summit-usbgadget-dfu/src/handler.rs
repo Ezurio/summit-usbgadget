@@ -16,7 +16,9 @@ use super::config::{DfuConfig, UploadSource};
 use super::protocol::{request, GetStatus, State, Status};
 
 const DFU_SUFFIX_LEN: usize = 16;
-const MANIFEST_POLL_TIMEOUT_MS: u32 = 250;
+const DNLOAD_BUSY_POLL_TIMEOUT_MS: u32 = 100;
+const MANIFEST_POLL_TIMEOUT_MS: u32 = 100;
+const TRANSFER_IDLE_TIMEOUT_MS: u64 = 5_000;
 
 /// Payload returned for a DFU device-to-host control request.
 #[derive(Debug, Clone)]
@@ -141,28 +143,27 @@ impl Dfu {
         self.download_crc = Hasher::new();
     }
 
-    /// Idle-timeout duration for the endpoint-zero loop: `None` while
-    /// genuinely idle (waiting for a transfer to start), otherwise derived
-    /// from the poll interval already told to the host in `DFU_GETSTATUS` --
-    /// if dfu-util hasn't polled within many multiples of its own instructed
-    /// interval, it's gone.
+    /// Idle-timeout duration for the endpoint-zero loop: `None` while idle.
+    /// During download and manifestation this detects a stalled gap between
+    /// host control requests; it does not limit the total transfer duration.
     pub(crate) fn dfu_idle_timeout(&self) -> Option<std::time::Duration> {
         (self.state != State::DfuIdle).then(|| {
-            std::time::Duration::from_millis(self.poll_timeout_ms.max(MANIFEST_POLL_TIMEOUT_MS) as u64 * 20)
+            std::time::Duration::from_millis(TRANSFER_IDLE_TIMEOUT_MS)
         })
     }
 
-    /// Called when the host goes quiet mid-transfer. Stops feeding swupdate
-    /// with `eof` (not `abort_transfer`'s full sink abort) so its status task
-    /// can still resolve on its own in the background, and resets the state
-    /// machine so the next attempt starts clean.
+    /// Called when the host goes quiet mid-transfer. Fully abort the old
+    /// SWUpdate session before creating a replacement, so a stalled DFU cannot
+    /// keep SWUpdate occupied when fastboot starts another update. It is also
+    /// used during transport teardown, including while a data-stage read is
+    /// still active; in that case the state may still be `DfuIdle`, but the
+    /// session still must be torn down.
     pub(crate) async fn reset_on_idle_timeout(&mut self) {
-        if self.state == State::DfuIdle {
-            return;
+        if self.state != State::DfuIdle {
+            log::warn!("DFU: no host activity during transfer, resetting from state {:?}", self.state);
         }
-        log::warn!("DFU: no host activity during transfer, resetting");
         if let Some(sink) = self.sink.as_mut() {
-            sink.eof();
+            sink.abort().await;
         }
         self.sink = Some(SwupdateSession::new(self.download.clone(), self.transfer_size as usize));
         self.pending = None;
@@ -244,17 +245,25 @@ impl Dfu {
             other => other,
         };
 
+        let poll_timeout_ms = match self.state {
+            State::DnloadIdle => 0,
+            State::DnBusy => DNLOAD_BUSY_POLL_TIMEOUT_MS,
+            State::Manifest | State::ManifestSync => MANIFEST_POLL_TIMEOUT_MS,
+            _ => self.poll_timeout_ms,
+        };
         let response = GetStatus {
             status: self.status,
-            poll_timeout_ms: if matches!(self.state, State::Manifest | State::ManifestSync) {
-                MANIFEST_POLL_TIMEOUT_MS
-            } else {
-                self.poll_timeout_ms
-            },
+            poll_timeout_ms,
             state: self.state,
             string_index: 0,
         };
-        log::debug!("DFU_GETSTATUS -> status {:?}, state {:?}", self.status, self.state);
+        log::debug!(
+            "DFU_GETSTATUS -> status {:?}, state {:?}, poll_timeout_ms={}, pending={}",
+            self.status,
+            self.state,
+            poll_timeout_ms,
+            self.pending.is_some(),
+        );
         let mut buf = [0u8; 6];
         buf.copy_from_slice(&response.to_bytes());
         InReply::Inline { buf, len: 6 }
@@ -368,10 +377,13 @@ impl Dfu {
         let carry = self.download_tail.len();
         let len = req.len();
 
+        log::debug!("DFU_DNLOAD data stage: block length={len}, carried suffix={carry}");
+
         let mut buf = self.sink.as_mut().expect("sink present").buffer(carry + len);
         buf.extend_from_slice(&self.download_tail);
         buf.resize(carry + len, 0);
         let received = req.recv_async(&mut buf[carry..]).await?;
+        log::debug!("DFU_DNLOAD data stage complete: received={received}/{len}");
         buf.truncate(carry + received);
 
         self.state = State::DnloadSync;

@@ -125,20 +125,12 @@ struct FastbootUsbState {
     /// point this reply is finally sent and the session reset. `None` means no
     /// download failure is being drained.
     pending_fail_reply: Option<&'static [u8]>,
-    /// Set once a bulk-OUT operation sees a closed-transport error
-    /// (`is_closed_transport_error`: `ENOTCONN`/`ESHUTDOWN`/`BrokenPipe`, or
-    /// ci_hdrc's unbind-time `EINTR`), which means the endpoint is gone for
-    /// good (`RunningGadget::shutdown` in `summit-usbgadget-usb/src/gadget.rs`
-    /// writes `\n` to the UDC configfs file synchronously, which blocks until
-    /// the driver disables the endpoint and force-completes every pending
-    /// request). Submitting *further* reads here is actively harmful: a read
-    /// queued while the driver is mid-disable can prevent that disable's
-    /// request-queue drain from ever completing, hanging the unbind
-    /// indefinitely. So this is a one-way, unrecoverable signal — never
-    /// cleared by `reset_state()` — that permanently stops both `submit_recv`
-    /// and `data_loop` from ever touching the endpoint again for this
-    /// instance, regardless of which specific closed-transport error tripped
-    /// it.
+    /// Set while a bulk-OUT closed-transport error (`ESHUTDOWN` / `ENOTCONN` /
+    /// `BrokenPipe`) is being drained. Cable unplug produces this on Disable;
+    /// it is **not** UDC teardown. `data_loop` must keep the endpoint files
+    /// open and wait for the next Enable. Submitting a *new* read before
+    /// Disable is observed can hang a later UDC unbind, so `submit_recv`
+    /// stays off until the next connected phase.
     gadget_torn_down: bool,
 }
 
